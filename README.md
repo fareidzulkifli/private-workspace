@@ -1,26 +1,22 @@
 # Private Workspace
 
-Private Workspace is a Go, SQLite, and Vite React application migrated from the
-former Next.js/Supabase task manager. Production is intended to run without a
-Node server: Nginx terminates HTTPS using certificates managed by Certbot, the
-Go binary serves APIs and the compiled Vite app, and SQLite WAL stores
-application data.
+Private Workspace is a Go, SQLite, and Vite React application. Production is
+intended to run without a Node server: Nginx terminates HTTPS using certificates
+managed by Certbot, the Go binary serves APIs and the compiled Vite app, and
+SQLite WAL stores application data.
 
 ## Repository Layout
 
 ```text
 cmd/
-  audit-supabase-schema/        # migration-only schema audit
   backup-sqlite/                # SQLite backup command
   hash-password/                # Argon2id admin password hash helper
-  migrate-supabase-to-sqlite/   # migration-only importer
   server/                       # production Go server
-internal/                       # Go runtime, feature APIs, auth, migration helpers
+internal/                       # Go runtime, feature APIs, auth, SQLite, backups
 migrations/                     # active SQLite migrations
 web/                            # Vite React app
 ops/                            # systemd, Nginx, and env templates
 .docs/ops/                      # staging, cutover, backup, restore runbooks
-db/                             # historical Supabase schema references only
 ```
 
 ## Local Setup
@@ -70,32 +66,6 @@ Build production binaries:
 ```bash
 go build -o dist/private-workspace ./cmd/server
 go build -o dist/backup-sqlite ./cmd/backup-sqlite
-```
-
-## Migration Commands
-
-Audit the live Supabase/Postgres schema:
-
-```bash
-SUPABASE_DB_URL='postgres://...' go run ./cmd/audit-supabase-schema
-```
-
-Run a dry-run Supabase-to-SQLite import:
-
-```bash
-SUPABASE_DB_URL='postgres://...' \
-SQLITE_PATH=./data/private-workspace-shadow.db \
-MIGRATION_DRY_RUN=true \
-go run ./cmd/migrate-supabase-to-sqlite
-```
-
-Run a real import into a new SQLite file:
-
-```bash
-SUPABASE_DB_URL='postgres://...' \
-SQLITE_PATH=./data/private-workspace.db \
-MIGRATION_DRY_RUN=false \
-go run ./cmd/migrate-supabase-to-sqlite
 ```
 
 Create a consistent SQLite backup:

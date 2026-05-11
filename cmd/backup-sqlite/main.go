@@ -7,27 +7,27 @@ import (
 	"path/filepath"
 	"time"
 
-	"private-workspace/internal/phase1"
+	"private-workspace/internal/backup"
 )
 
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	sqlitePath, err := phase1.RequiredEnv("SQLITE_PATH")
+	sqlitePath, err := backup.RequiredEnv("SQLITE_PATH")
 	if err != nil {
 		fatal(err)
 	}
 
-	report, err := phase1.RunBackup(ctx, phase1.BackupOptions{
+	report, err := backup.Run(ctx, backup.Options{
 		SQLitePath: sqlitePath,
-		BackupDir:  phase1.Env("BACKUP_DIR", "backups"),
-		Tier:       phase1.Env("BACKUP_TIER", "hourly"),
-		R2:         phase1.R2BackupOptionsFromEnv(),
+		BackupDir:  backup.Env("BACKUP_DIR", "backups"),
+		Tier:       backup.Env("BACKUP_TIER", "hourly"),
+		R2:         backup.R2OptionsFromEnv(),
 	})
 	if report != nil {
 		markdown := report.Markdown()
-		reportPath := phase1.Env("BACKUP_REPORT_PATH", defaultReportPath("backup-report", report.CompletedAt))
+		reportPath := backup.Env("BACKUP_REPORT_PATH", defaultReportPath("backup-report", report.CompletedAt))
 		if err := os.MkdirAll(filepath.Dir(reportPath), 0o750); err != nil {
 			fatal(err)
 		}

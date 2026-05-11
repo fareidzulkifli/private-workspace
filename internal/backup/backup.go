@@ -1,4 +1,4 @@
-package phase1
+package backup
 
 import (
 	"compress/gzip"
@@ -16,17 +16,20 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	_ "modernc.org/sqlite"
 )
 
-type BackupOptions struct {
+const sqliteDriver = "sqlite"
+
+type Options struct {
 	SQLitePath string
 	BackupDir  string
 	Tier       string
 	Now        time.Time
-	R2         R2BackupOptions
+	R2         R2Options
 }
 
-type R2BackupOptions struct {
+type R2Options struct {
 	Endpoint        string
 	AccessKeyID     string
 	SecretAccessKey string
@@ -35,7 +38,7 @@ type R2BackupOptions struct {
 	Prefix          string
 }
 
-type BackupReport struct {
+type Report struct {
 	StartedAt   time.Time
 	CompletedAt time.Time
 	SQLitePath  string
@@ -46,8 +49,8 @@ type BackupReport struct {
 	Integrity   string
 }
 
-func R2BackupOptionsFromEnv() R2BackupOptions {
-	return R2BackupOptions{
+func R2OptionsFromEnv() R2Options {
+	return R2Options{
 		Endpoint:        Env("R2_ENDPOINT", ""),
 		AccessKeyID:     Env("R2_ACCESS_KEY_ID", ""),
 		SecretAccessKey: Env("R2_SECRET_ACCESS_KEY", ""),
@@ -57,13 +60,16 @@ func R2BackupOptionsFromEnv() R2BackupOptions {
 	}
 }
 
-func (o R2BackupOptions) Complete() bool {
+func (o R2Options) Complete() bool {
 	return o.Endpoint != "" && o.AccessKeyID != "" && o.SecretAccessKey != "" && o.Bucket != ""
 }
 
-func RunBackup(ctx context.Context, opts BackupOptions) (*BackupReport, error) {
+func Run(ctx context.Context, opts Options) (*Report, error) {
 	if opts.SQLitePath == "" {
 		return nil, errors.New("sqlite path is required")
+	}
+	if _, err := os.Stat(opts.SQLitePath); err != nil {
+		return nil, fmt.Errorf("stat sqlite source: %w", err)
 	}
 	if opts.BackupDir == "" {
 		opts.BackupDir = "backups"
@@ -80,7 +86,7 @@ func RunBackup(ctx context.Context, opts BackupOptions) (*BackupReport, error) {
 	}
 
 	startedAt := time.Now().UTC()
-	db, err := OpenSQLite(ctx, opts.SQLitePath)
+	db, err := openSQLite(ctx, opts.SQLitePath)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +114,7 @@ func RunBackup(ctx context.Context, opts BackupOptions) (*BackupReport, error) {
 		return nil, fmt.Errorf("backup already exists: %s", gzipPath)
 	}
 
-	if _, err := db.ExecContext(ctx, "VACUUM INTO "+QuoteSQLiteString(rawPath)); err != nil {
+	if _, err := db.ExecContext(ctx, "VACUUM INTO "+quoteSQLiteString(rawPath)); err != nil {
 		return nil, fmt.Errorf("vacuum into backup: %w", err)
 	}
 
@@ -132,7 +138,7 @@ func RunBackup(ctx context.Context, opts BackupOptions) (*BackupReport, error) {
 		return nil, fmt.Errorf("remove uncompressed backup: %w", err)
 	}
 
-	report := &BackupReport{
+	report := &Report{
 		StartedAt:   startedAt,
 		CompletedAt: time.Now().UTC(),
 		SQLitePath:  opts.SQLitePath,
@@ -143,7 +149,7 @@ func RunBackup(ctx context.Context, opts BackupOptions) (*BackupReport, error) {
 
 	if opts.R2.Complete() {
 		objectKey := pathJoin(opts.R2.Prefix, opts.Tier, filepath.Base(gzipPath))
-		if err := uploadBackupToR2(ctx, opts.R2, objectKey, gzipPath); err != nil {
+		if err := uploadToR2(ctx, opts.R2, objectKey, gzipPath); err != nil {
 			return report, err
 		}
 		report.ObjectKey = objectKey
@@ -153,7 +159,7 @@ func RunBackup(ctx context.Context, opts BackupOptions) (*BackupReport, error) {
 	return report, nil
 }
 
-func (r BackupReport) Markdown() string {
+func (r Report) Markdown() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# SQLite Backup Report\n\n")
 	fmt.Fprintf(&b, "- Started at: %s\n", r.StartedAt.UTC().Format(time.RFC3339))
@@ -166,6 +172,36 @@ func (r BackupReport) Markdown() string {
 		fmt.Fprintf(&b, "- R2 object key: `%s`\n", r.ObjectKey)
 	}
 	return b.String()
+}
+
+func openSQLite(ctx context.Context, path string) (*sql.DB, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("sqlite path is required")
+	}
+	db, err := sql.Open(sqliteDriver, path)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+
+	configureCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	pragmas := []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA synchronous = NORMAL",
+		"PRAGMA foreign_keys = ON",
+		"PRAGMA busy_timeout = 5000",
+		"PRAGMA wal_autocheckpoint = 1000",
+	}
+	for _, stmt := range pragmas {
+		if _, err := db.ExecContext(configureCtx, stmt); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("set %s: %w", stmt, err)
+		}
+	}
+	return db, nil
 }
 
 func integrityCheck(ctx context.Context, db *sql.DB) (string, error) {
@@ -214,7 +250,7 @@ func gzipFile(sourcePath, targetPath string) error {
 	return nil
 }
 
-func uploadBackupToR2(ctx context.Context, opts R2BackupOptions, objectKey, filePath string) error {
+func uploadToR2(ctx context.Context, opts R2Options, objectKey, filePath string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("open backup for upload: %w", err)
@@ -254,4 +290,8 @@ func pathJoin(parts ...string) string {
 		}
 	}
 	return strings.Join(cleaned, "/")
+}
+
+func quoteSQLiteString(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }

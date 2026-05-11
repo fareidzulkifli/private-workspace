@@ -1,4 +1,4 @@
-package phase1
+package backup
 
 import (
 	"compress/gzip"
@@ -8,25 +8,27 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"private-workspace/internal/db"
 )
 
-func TestRunBackupCreatesRestorableGzip(t *testing.T) {
+func TestRunCreatesRestorableGzip(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "private-workspace.db")
 
-	db, err := OpenSQLite(ctx, dbPath)
+	store, err := db.Open(ctx, db.Config{
+		Path:          dbPath,
+		MigrationsDir: filepath.Join("..", "..", "migrations"),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ApplyMigrations(ctx, db, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
+	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	report, err := RunBackup(ctx, BackupOptions{
+	report, err := Run(ctx, Options{
 		SQLitePath: dbPath,
 		BackupDir:  filepath.Join(tmp, "backups"),
 		Tier:       "hourly",
@@ -46,7 +48,7 @@ func TestRunBackupCreatesRestorableGzip(t *testing.T) {
 	if err := gunzipFile(report.GzipPath, restoredPath); err != nil {
 		t.Fatal(err)
 	}
-	restoredDB, err := OpenSQLite(ctx, restoredPath)
+	restoredDB, err := openSQLite(ctx, restoredPath)
 	if err != nil {
 		t.Fatal(err)
 	}

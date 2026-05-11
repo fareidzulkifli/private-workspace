@@ -72,7 +72,7 @@ finding*
 # local docs not needed for runtime deployment
 /.docs/
 
-# Phase 1 migration outputs
+# SQLite runtime and backup outputs
 /data/
 *.db
 *.db-shm

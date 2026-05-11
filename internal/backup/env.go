@@ -1,9 +1,8 @@
-package phase1
+package backup
 
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -21,16 +20,4 @@ func Env(name, fallback string) string {
 		return fallback
 	}
 	return value
-}
-
-func EnvBool(name string, fallback bool) (bool, error) {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback, nil
-	}
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return false, fmt.Errorf("%s must be true or false: %w", name, err)
-	}
-	return parsed, nil
 }
