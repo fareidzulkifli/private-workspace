@@ -1,0 +1,176 @@
+name: Deploy private-workspace
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: production-private-workspace
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 20
+
+    env:
+      APP_NAME: private-workspace
+      APP_BINARY: private-workspace
+      BACKUP_BINARY: backup-sqlite
+      GOOS: linux
+      GOARCH: amd64
+      CGO_ENABLED: 0
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web app
+        run: |
+          npm --prefix web ci
+          npm --prefix web run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Test Go packages
+        run: go test ./cmd/... ./internal/...
+
+      - name: Build Go binaries
+        run: |
+          mkdir -p release/web
+          go build -trimpath -ldflags="-s -w" -o "release/${APP_BINARY}" ./cmd/server
+          go build -trimpath -ldflags="-s -w" -o "release/${BACKUP_BINARY}" ./cmd/backup-sqlite
+          cp -a migrations release/migrations
+          cp -a web/dist release/web/dist
+
+      - name: Create release archive
+        run: tar -czf "${APP_NAME}-${GITHUB_SHA}.tar.gz" -C release .
+
+      - name: Validate deployment secrets
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          test -n "$VPS_HOST" || { echo "VPS_HOST is required"; exit 1; }
+          test -n "$VPS_USER" || { echo "VPS_USER is required"; exit 1; }
+          test -n "$VPS_PORT" || { echo "VPS_PORT is required"; exit 1; }
+          test -n "$VPS_SSH_KEY" || { echo "VPS_SSH_KEY is required"; exit 1; }
+          test -n "$VPS_KNOWN_HOSTS" || { echo "VPS_KNOWN_HOSTS is required"; exit 1; }
+
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Upload release archive
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          scp -P "${VPS_PORT:-22}" \
+            -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${APP_NAME}-${GITHUB_SHA}.tar.gz" \
+            "$VPS_USER@$VPS_HOST:/tmp/${APP_NAME}-${GITHUB_SHA}.tar.gz"
+
+      - name: Activate release on VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          ssh -p "${VPS_PORT:-22}" \
+            -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "$VPS_USER@$VPS_HOST" \
+            "APP_NAME='${APP_NAME}' APP_BINARY='${APP_BINARY}' BACKUP_BINARY='${BACKUP_BINARY}' GITHUB_SHA='${GITHUB_SHA}' bash -s" <<'EOF'
+          set -euo pipefail
+
+          APP_ROOT="/opt/$APP_NAME"
+          RELEASE_DIR="$APP_ROOT/releases/$GITHUB_SHA"
+          ARCHIVE="/tmp/$APP_NAME-$GITHUB_SHA.tar.gz"
+          SERVICE="$APP_NAME.service"
+          ENV_FILE="/etc/$APP_NAME/env"
+
+          read_env() {
+            awk -v key="$1" 'BEGIN { FS = "=" } $1 == key { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE"
+          }
+
+          if [ -f "$ENV_FILE" ] && [ -x "$APP_ROOT/current/$BACKUP_BINARY" ]; then
+            SQLITE_PATH_VALUE="$(read_env SQLITE_PATH || true)"
+            BACKUP_DIR_VALUE="$(read_env BACKUP_DIR || true)"
+            if [ -n "$SQLITE_PATH_VALUE" ]; then
+              env \
+                SQLITE_PATH="$SQLITE_PATH_VALUE" \
+                BACKUP_DIR="${BACKUP_DIR_VALUE:-/var/backups/$APP_NAME}" \
+                BACKUP_TIER=hourly \
+                BACKUP_REPORT_PATH="/var/log/$APP_NAME/predeploy-${GITHUB_SHA}.md" \
+                "$APP_ROOT/current/$BACKUP_BINARY"
+            fi
+          fi
+
+          mkdir -p "$RELEASE_DIR"
+          tar -xzf "$ARCHIVE" -C "$RELEASE_DIR"
+
+          chmod 750 "$APP_ROOT" "$APP_ROOT/releases" "$RELEASE_DIR"
+          chmod 750 "$RELEASE_DIR/migrations" "$RELEASE_DIR/web" "$RELEASE_DIR/web/dist"
+          find "$RELEASE_DIR/migrations" -type f -exec chmod 640 {} +
+          find "$RELEASE_DIR/web/dist" -type d -exec chmod 750 {} +
+          find "$RELEASE_DIR/web/dist" -type f -exec chmod 640 {} +
+          chmod 750 "$RELEASE_DIR/$APP_BINARY" "$RELEASE_DIR/$BACKUP_BINARY"
+
+          ln -sfn "$RELEASE_DIR" "$APP_ROOT/current.new"
+          mv -Tf "$APP_ROOT/current.new" "$APP_ROOT/current"
+
+          sudo systemctl restart "$SERVICE"
+
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS "http://127.0.0.1:4000/api/healthz" >/dev/null; then
+              echo "Health check passed"
+              break
+            fi
+
+            if [ "$i" = "10" ]; then
+              echo "Health check failed"
+              sudo systemctl status "$SERVICE" --no-pager --full
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          rm -f "$ARCHIVE"
+
+          cd "$APP_ROOT/releases"
+          ls -1dt */ | tail -n +6 | xargs -r rm -rf
+          EOF
