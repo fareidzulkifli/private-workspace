@@ -136,6 +136,10 @@ func (h *Handler) redirectStaleDistAsset(w http.ResponseWriter, r *http.Request,
 	if !h.hasDist || !isHashedAsset(cleanPath) || !strings.HasPrefix(cleanPath, "/assets/") {
 		return false
 	}
+	prefix, ext, ok := splitViteAssetName(path.Base(cleanPath))
+	if !ok || prefix != "index" || (ext != ".css" && ext != ".js") {
+		return false
+	}
 	fallback, ok := h.findFallbackAsset(cleanPath)
 	if !ok || fallback == cleanPath {
 		return false

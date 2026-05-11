@@ -299,6 +299,48 @@ func TestStaleIndexAssetsRedirectToCurrentBuild(t *testing.T) {
 	}
 }
 
+func TestStaleLazyJSAssetDoesNotRedirectToCurrentChunk(t *testing.T) {
+	distDir := t.TempDir()
+	assetsDir := filepath.Join(distDir, "assets")
+	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	index := `<!doctype html>
+<html>
+<head>
+  <script type="module" crossorigin src="/assets/index-DkVOd-0Q.js"></script>
+</head>
+<body><div id="root"></div></body>
+</html>`
+	if err := os.WriteFile(filepath.Join(distDir, "index.html"), []byte(index), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(assetsDir, "index-DkVOd-0Q.js"), []byte("console.log('current')"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(assetsDir, "Wallet-Jwoqy3Bc.js"), []byte("console.log('wallet current')"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	router, cleanup := newTestRouterWithWeb(t, web.New(web.Options{
+		DistDir:   distDir,
+		PublicDir: filepath.Join(t.TempDir(), "public"),
+		Favicon:   filepath.Join(t.TempDir(), "favicon.ico"),
+	}))
+	defer cleanup()
+
+	rec := perform(router, http.MethodGet, "/assets/Wallet-B8P8_NAv.js", nil, nil, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("stale lazy chunk status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "" {
+		t.Fatalf("stale lazy chunk redirect = %q", got)
+	}
+	if strings.Contains(rec.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("stale lazy chunk content type = %q", rec.Header().Get("Content-Type"))
+	}
+}
+
 func newTestRouter(t *testing.T) (http.Handler, func()) {
 	t.Helper()
 	emptyDir := t.TempDir()

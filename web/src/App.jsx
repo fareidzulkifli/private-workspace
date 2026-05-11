@@ -12,6 +12,18 @@ const GitNoteRoute = lazy(() => import('./routes/GitNoteRoute'))
 const ShareRoute = lazy(() => import('./routes/ShareRoute'))
 const Wallet = lazy(() => import('./routes/Wallet'))
 
+const CHUNK_RELOAD_KEY = 'private-workspace:chunk-reload-at'
+
+window.addEventListener('vite:preloadError', event => {
+  event.preventDefault()
+  const now = Date.now()
+  const lastReload = Number(window.sessionStorage.getItem(CHUNK_RELOAD_KEY) || 0)
+  if (now - lastReload > 30000) {
+    window.sessionStorage.setItem(CHUNK_RELOAD_KEY, String(now))
+    window.location.reload()
+  }
+})
+
 function RouteFallback() {
   return <div className="app-route-loading">Loading...</div>
 }
