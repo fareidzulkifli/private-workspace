@@ -1,0 +1,87 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/web/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+/.cache/
+
+# legacy Next.js build outputs
+/.next/
+/out/
+
+# production
+/build
+/dist
+/web/dist
+
+# misc
+.DS_Store
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.log
+*:Zone.Identifier
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+*.env
+*.env.local
+*.local.env
+ops/env/*.env
+!.env.local.example
+!*.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# local AI/agent workspace
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+agents.md
+claude.md
+gemini.md
+.agents/
+.codex/
+.claude/
+.mcp.json
+finding*
+
+# local docs not needed for runtime deployment
+/.docs/
+
+# Phase 1 migration outputs
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.db.gz
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+/backups/

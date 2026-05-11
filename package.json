@@ -1,0 +1,13 @@
+{
+  "name": "private-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "bash scripts/dev-server.sh",
+    "server:dev": "bash scripts/dev-server.sh",
+    "web:install": "npm --prefix web install",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "web:preview": "npm --prefix web run preview"
+  }
+}

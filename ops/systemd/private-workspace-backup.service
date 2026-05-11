@@ -1,0 +1,19 @@
+[Unit]
+Description=Private Workspace SQLite Backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=private-workspace
+Group=private-workspace
+EnvironmentFile=/etc/private-workspace/env
+WorkingDirectory=/opt/private-workspace/current
+ExecStart=/opt/private-workspace/current/backup-sqlite
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/private-workspace /var/backups/private-workspace /var/log/private-workspace /tmp
+StateDirectory=private-workspace
+LogsDirectory=private-workspace

@@ -1,0 +1,24 @@
+[Unit]
+Description=Private Workspace Go Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=private-workspace
+Group=private-workspace
+EnvironmentFile=/etc/private-workspace/env
+WorkingDirectory=/opt/private-workspace/current
+ExecStart=/opt/private-workspace/current/private-workspace
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/private-workspace /var/log/private-workspace /tmp
+StateDirectory=private-workspace
+LogsDirectory=private-workspace
+
+[Install]
+WantedBy=multi-user.target
