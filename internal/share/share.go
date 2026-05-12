@@ -2,7 +2,9 @@ package share
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,11 @@ import (
 	"private-workspace/internal/gitnote"
 	"private-workspace/internal/httputil"
 	"private-workspace/internal/shared"
+)
+
+const (
+	shareTokenRandomBytes = 12
+	shareSlugMaxLength    = 48
 )
 
 type GitNoteShare struct {
@@ -74,7 +81,7 @@ func (r *Repository) CreateGitNoteShare(ctx context.Context, req createRequest) 
 	if err != nil {
 		return CreateGitNoteShareResponse{}, err
 	}
-	token, err := shared.NewToken(32)
+	token, err := newShareToken(title, pathPrefix)
 	if err != nil {
 		return CreateGitNoteShareResponse{}, err
 	}
@@ -367,6 +374,72 @@ func cleanPrefix(value string) (string, error) {
 		return "", errors.New("pathPrefix is required")
 	}
 	return gitnote.NormalizePath(value)
+}
+
+func newShareToken(title *string, pathPrefix string) (string, error) {
+	label := ""
+	if title != nil {
+		label = *title
+	}
+	if strings.TrimSpace(label) == "" {
+		label = lastPathSegment(pathPrefix)
+	}
+	if dot := strings.LastIndexByte(label, '.'); dot > 0 {
+		label = label[:dot]
+	}
+
+	slug := slugifyShareLabel(label)
+	if slug == "" {
+		slug = "note"
+	}
+
+	suffix, err := randomURLToken(shareTokenRandomBytes)
+	if err != nil {
+		return "", err
+	}
+	return slug + "-" + suffix, nil
+}
+
+func randomURLToken(bytes int) (string, error) {
+	b := make([]byte, bytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate share token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func lastPathSegment(value string) string {
+	value = strings.Trim(value, "/")
+	if value == "" {
+		return ""
+	}
+	if idx := strings.LastIndexByte(value, '/'); idx >= 0 {
+		return value[idx+1:]
+	}
+	return value
+}
+
+func slugifyShareLabel(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+
+	for _, r := range value {
+		if b.Len() >= shareSlugMaxLength {
+			break
+		}
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if b.Len() > 0 && !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+
+	return strings.Trim(b.String(), "-")
 }
 
 func parseExpiresAt(value *string) (*string, error) {

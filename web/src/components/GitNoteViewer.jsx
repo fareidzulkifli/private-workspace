@@ -6,8 +6,11 @@ import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/core'
 import bash from 'highlight.js/lib/languages/bash'
 import css from 'highlight.js/lib/languages/css'
+import dockerfile from 'highlight.js/lib/languages/dockerfile'
+import go from 'highlight.js/lib/languages/go'
 import javascript from 'highlight.js/lib/languages/javascript'
 import json from 'highlight.js/lib/languages/json'
+import makefile from 'highlight.js/lib/languages/makefile'
 import markdown from 'highlight.js/lib/languages/markdown'
 import python from 'highlight.js/lib/languages/python'
 import sql from 'highlight.js/lib/languages/sql'
@@ -27,8 +30,11 @@ const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'i
 const highlightLanguages = {
   bash,
   css,
+  dockerfile,
+  go,
   javascript,
   json,
+  makefile,
   markdown,
   python,
   sql,
@@ -107,16 +113,6 @@ function stripFrontMatter(text) {
 
 marked.setOptions({ gfm: true, breaks: false })
 
-function encodePathSegments(value) {
-  return value.split('/').map(segment => {
-    try {
-      return encodeURIComponent(decodeURIComponent(segment))
-    } catch {
-      return encodeURIComponent(segment)
-    }
-  }).join('/')
-}
-
 function decodePathSegment(value) {
   try {
     return decodeURIComponent(value)
@@ -181,11 +177,10 @@ export default function GitNoteViewer({ filePath, onToggleExplorer, explorerVisi
       const data = await res.json()
       if (!res.ok) throw new Error(data?.error || 'Unable to share note')
 
-      const encodedPath = encodePathSegments(filePath)
       const baseSharePath = data.token ? `/share/${encodeURIComponent(data.token)}` : data.url
       if (!baseSharePath) throw new Error('Share response missing URL')
 
-      const sharePath = `${baseSharePath.replace(/\/$/, '')}/${encodedPath}`
+      const sharePath = baseSharePath.replace(/\/$/, '')
       await copyToClipboard(window.location.origin + sharePath)
       setShareStatus('copied')
       setTimeout(() => setShareStatus('idle'), 2000)

@@ -366,8 +366,20 @@ func TestPromptsContextPacksAIUploadGitNoteAndShares(t *testing.T) {
 		"expiresAt":  nil,
 	}), cookie, csrf, http.StatusCreated)
 	token := createdShare["token"].(string)
-	if len(token) < 32 || createdShare["url"] != "/share/"+token {
+	if createdShare["url"] != "/share/"+token {
 		t.Fatalf("share = %#v", createdShare)
+	}
+	if !strings.HasPrefix(token, "private-notes-") {
+		t.Fatalf("share token should be readable, got %q", token)
+	}
+	suffix := strings.TrimPrefix(token, "private-notes-")
+	if len(suffix) != 16 {
+		t.Fatalf("share token suffix length = %d token=%q", len(suffix), token)
+	}
+	for _, r := range suffix {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			t.Fatalf("share token suffix contains unsafe character %q in %q", r, token)
+		}
 	}
 	var tokenHash string
 	if err := database.SQL().QueryRow("SELECT token_hash FROM gitnote_shares WHERE id = ?", createdShare["id"]).Scan(&tokenHash); err != nil {
