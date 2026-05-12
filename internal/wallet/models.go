@@ -146,6 +146,7 @@ type ReconciliationAdjustment struct {
 type BalanceUpdateResult struct {
 	BalanceUpdate BalanceUpdate             `json:"balance_update"`
 	Adjustment    *ReconciliationAdjustment `json:"adjustment"`
+	Transaction   *Transaction              `json:"transaction,omitempty"`
 }
 
 type ReviewTransactionsResult struct {

@@ -24,6 +24,9 @@ func (r *Repository) SplitTransaction(ctx context.Context, id string, req Create
 	if parent.Kind != "spend" {
 		return TransactionSplitResult{}, errors.New("only spending transactions can be split")
 	}
+	if parent.Source == "reconciliation" {
+		return TransactionSplitResult{}, errors.New("reconciliation transactions cannot be split")
+	}
 	hasChildren, err := r.transactionHasSplitChildren(ctx, parent.ID)
 	if err != nil {
 		return TransactionSplitResult{}, err

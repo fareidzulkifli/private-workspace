@@ -415,7 +415,7 @@ func TestSettingsOrderFollowsSortOrderAcrossActiveStates(t *testing.T) {
 	}
 }
 
-func TestReconciliationBalanceUpdateCreatesAdjustment(t *testing.T) {
+func TestReconciliationBalanceUpdateCreatesHiddenLedgerTransaction(t *testing.T) {
 	repo, cleanup := newTestRepository(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -459,18 +459,53 @@ func TestReconciliationBalanceUpdateCreatesAdjustment(t *testing.T) {
 	if result.BalanceUpdate.PreviousBalanceCents != 599000 || result.BalanceUpdate.ExpectedBalanceCents != 599000 {
 		t.Fatalf("balance update = %#v", result.BalanceUpdate)
 	}
-	if result.Adjustment == nil || result.Adjustment.AmountCents != 100 || result.Adjustment.Reason != "rounding" {
-		t.Fatalf("adjustment = %#v", result.Adjustment)
+	if result.Adjustment != nil {
+		t.Fatalf("legacy adjustment = %#v", result.Adjustment)
+	}
+	if result.Transaction == nil || result.Transaction.Kind != "income" || result.Transaction.AmountCents != 100 ||
+		result.Transaction.AllocationName != ReconciliationAllocationName || result.Transaction.CategoryName != ReconciliationCategoryName {
+		t.Fatalf("reconciliation income transaction = %#v", result.Transaction)
 	}
 	summary, err := repo.Summary(ctx, "2026-05")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.WalletBalanceCents != 599100 || summary.AdjustmentTotalCents != 100 || summary.VarianceCents != 0 {
+	if summary.WalletBalanceCents != 599100 || summary.ExpectedBalanceCents != 599100 ||
+		summary.IncomeTotalCents != 500100 || summary.SpendingTotalCents != 1000 ||
+		summary.AdjustmentTotalCents != 0 || summary.VarianceCents != 0 {
 		t.Fatalf("summary after reconciliation = %#v", summary)
 	}
-	if len(summary.BalanceUpdates) != 1 || len(summary.Adjustments) != 1 {
+	if len(summary.Allocations) != 1 || summary.Allocations[0].Name != "Work Expense" {
+		t.Fatalf("visible allocations = %#v", summary.Allocations)
+	}
+	if len(summary.BalanceUpdates) != 1 || len(summary.Adjustments) != 0 {
 		t.Fatalf("reconciliation history = updates:%#v adjustments:%#v", summary.BalanceUpdates, summary.Adjustments)
+	}
+	settings, err := repo.Settings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, category := range settings.Categories {
+		if category.Name == ReconciliationCategoryName || category.SystemKey != nil && *category.SystemKey == ReconciliationCategorySystemKey {
+			t.Fatalf("hidden adjustment category leaked into settings: %#v", settings.Categories)
+		}
+	}
+
+	result, err = repo.CreateBalanceUpdate(ctx, "2026-05", CreateBalanceUpdateRequest{
+		NewBalanceCents: 598900,
+		Note:            stringPtr("cash count lower"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Transaction == nil || result.Transaction.Kind != "spend" || result.Transaction.AmountCents != 200 ||
+		result.Transaction.AllocationName != ReconciliationAllocationName || result.Transaction.CategoryName != ReconciliationCategoryName {
+		t.Fatalf("reconciliation expense transaction = %#v", result.Transaction)
+	}
+	summary = mustSummary(t, repo, ctx, "2026-05")
+	if summary.WalletBalanceCents != 598900 || summary.ExpectedBalanceCents != 598900 ||
+		summary.IncomeTotalCents != 500100 || summary.SpendingTotalCents != 1200 || summary.VarianceCents != 0 {
+		t.Fatalf("summary after expense reconciliation = %#v", summary)
 	}
 }
 
@@ -542,10 +577,11 @@ func TestMonthBookAndDeleteMonthCascade(t *testing.T) {
 		t.Fatalf("month book rows = %#v", book)
 	}
 	row := book[0]
-	if row.Month != "2026-05" || row.Status != "closed" || row.AllocationCount != 2 || row.TransactionCount != 2 {
+	if row.Month != "2026-05" || row.Status != "closed" || row.AllocationCount != 2 || row.TransactionCount != 3 {
 		t.Fatalf("month book row = %#v", row)
 	}
-	if row.IncomeTotalCents != 500000 || row.SpendingTotalCents != 5000 || row.AdjustmentTotalCents != 100 || row.VarianceCents != 0 {
+	if row.IncomeTotalCents != 500100 || row.SpendingTotalCents != 5000 ||
+		row.AdjustmentTotalCents != 100 || row.ExpectedBalanceCents != 595100 || row.VarianceCents != 0 {
 		t.Fatalf("month book totals = %#v", row)
 	}
 

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
-  Banknote,
   BarChart3,
   BookOpen,
   CalendarDays,
@@ -13,7 +12,6 @@ import {
   GripVertical,
   Menu,
   Pencil,
-  PiggyBank,
   Plus,
   ReceiptText,
   RefreshCw,
@@ -267,6 +265,54 @@ function SummaryMetric({ label, value, tone, icon: Icon }) {
   )
 }
 
+function WalletBalanceCard({ children }) {
+  return (
+    <div className="wallet-balance-card">
+      <div className="wallet-balance-card-body">{children}</div>
+    </div>
+  )
+}
+
+function WalletBalanceLine({ label, value, tone }) {
+  return (
+    <div className={`wallet-balance-line ${tone ? `wallet-balance-line-${tone}` : ''}`}>
+      <span>{label}</span>
+      <strong>{formatMoney(value)}</strong>
+    </div>
+  )
+}
+
+function WalletBalanceSummary({ summary, className = '' }) {
+  return (
+    <section className={`wallet-balance-summary ${className}`.trim()}>
+      <WalletBalanceCard>
+        <WalletBalanceLine label="Opening Balance" value={summary.month.opening_balance_cents} />
+        <WalletBalanceLine label="Total Income" value={summary.income_total_cents} tone="good" />
+        <WalletBalanceLine label="Total Expense" value={summary.spending_total_cents} />
+      </WalletBalanceCard>
+
+      <WalletBalanceCard>
+        <WalletBalanceLine label="Actual Wallet Balance" value={summary.wallet_balance_cents} />
+        <WalletBalanceLine label="Expected Wallet Balance" value={summary.expected_balance_cents} />
+        <WalletBalanceLine
+          label="Variance"
+          value={summary.variance_cents}
+          tone={summary.variance_cents === 0 ? 'good' : 'warn'}
+        />
+      </WalletBalanceCard>
+
+      <WalletBalanceCard>
+        <WalletBalanceLine label="Reserved (Payable)" value={summary.total_reserved_cents} tone="bad" />
+        <WalletBalanceLine
+          label="Available Balance"
+          value={summary.available_balance_cents}
+          tone={summary.available_balance_cents < 0 ? 'bad' : 'good'}
+        />
+      </WalletBalanceCard>
+    </section>
+  )
+}
+
 function FieldError({ error }) {
   if (!error) return null
   return <small className="wallet-field-error">{error}</small>
@@ -397,7 +443,6 @@ function TransactionCaptureForm({
             ref={amountInputRef}
             value={transactionForm.amount}
             onChange={event => setTransactionForm(prev => ({ ...prev, amount: event.target.value }))}
-            onBlur={() => touchTransaction('amount')}
             placeholder="0.00"
             inputMode="decimal"
             disabled={captureDisabled}
@@ -463,7 +508,7 @@ function TransactionCaptureForm({
           )}
         </>
       ) : secondaryFields}
-      <button type="submit" className="btn-primary" disabled={saving || captureDisabled || hasErrors(transactionErrors)}>
+      <button type="submit" className="btn-primary" disabled={saving || captureDisabled}>
         <Plus size={14} />
         Add Transaction
       </button>
@@ -501,14 +546,16 @@ function RecentTransactionsPanel({
         ) : transactions.map(transaction => {
           const label = splitRoleLabel(transaction)
           const editingAmount = transactionAmountEdit?.id === transaction.id
+          const isIncome = transaction.kind === 'income'
+          const canSplit = transaction.kind === 'spend' && transaction.source !== 'reconciliation'
           return (
-            <div key={transaction.id} className="wallet-transaction-row">
+            <div key={transaction.id} className={`wallet-transaction-row ${isIncome ? 'is-income' : ''}`}>
               <span className="wallet-transaction-date">{transaction.date}</span>
               <div>
                 <strong>{transaction.note || transaction.category_name}</strong>
-                <span>{transaction.allocation_name} / {transaction.category_name}{transaction.rounded ? ' / Rounded' : ''}{label ? ` / ${label}` : ''}</span>
+                <span>{transaction.allocation_name} / {transaction.category_name}{isIncome ? ' / Income' : ''}{transaction.rounded ? ' / Rounded' : ''}{label ? ` / ${label}` : ''}</span>
               </div>
-              <strong>{formatMoney(transaction.amount_cents)}</strong>
+              <strong>{isIncome ? `+${formatMoney(transaction.amount_cents)}` : formatMoney(transaction.amount_cents)}</strong>
               <button
                 type="button"
                 className="btn-ghost wallet-transaction-action-btn"
@@ -523,9 +570,9 @@ function RecentTransactionsPanel({
                 type="button"
                 className="btn-ghost wallet-transaction-action-btn"
                 onClick={() => isSplitParent(transaction) ? openSplitDetail(transaction) : openSplitModal(transaction)}
-                disabled={saving || isSplitChild(transaction) || (!isSplitParent(transaction) && monthClosed)}
-                title={isSplitParent(transaction) ? 'View split group' : 'Split transaction'}
-                aria-label={isSplitParent(transaction) ? 'View split group' : 'Split transaction'}
+                disabled={saving || isSplitChild(transaction) || !canSplit || (!isSplitParent(transaction) && monthClosed)}
+                title={isSplitParent(transaction) ? 'View split group' : canSplit ? 'Split transaction' : 'Split unavailable'}
+                aria-label={isSplitParent(transaction) ? 'View split group' : canSplit ? 'Split transaction' : 'Split unavailable'}
               >
                 <Split size={15} />
               </button>
@@ -2297,6 +2344,8 @@ export default function WalletRoute() {
   const [allocationForm, setAllocationForm] = useState({ name: '', amount: '', type: 'flexible' })
   const [allocationTouched, setAllocationTouched] = useState({})
   const [allocationBudgetEdit, setAllocationBudgetEdit] = useState(null)
+  const [expandedAllocationID, setExpandedAllocationID] = useState('')
+  const [showZeroPayableAllocations, setShowZeroPayableAllocations] = useState(false)
   const [incomeForm, setIncomeForm] = useState({ name: '', amount: '', receivedDate: localDateKey(), notes: '' })
   const [incomeTouched, setIncomeTouched] = useState({})
   const [incomeEdit, setIncomeEdit] = useState(null)
@@ -2304,7 +2353,6 @@ export default function WalletRoute() {
   const [incomeTemplateForm, setIncomeTemplateForm] = useState({ name: '', amount: '', defaultDay: '' })
   const [categoryForm, setCategoryForm] = useState({ name: '' })
   const [reconcileOpen, setReconcileOpen] = useState(false)
-  const [adjustmentReason, setAdjustmentReason] = useState('rounding')
   const [adjustmentNote, setAdjustmentNote] = useState('')
   const [reviewFilters, setReviewFilters] = useState({ cleanup: true, unsorted: false, rounded: false })
   const [reviewTransactions, setReviewTransactions] = useState([])
@@ -2472,6 +2520,12 @@ export default function WalletRoute() {
     [summary]
   )
 
+  const visibleAllocations = useMemo(() => {
+    const allocations = summary?.allocations || []
+    if (showZeroPayableAllocations) return allocations
+    return allocations.filter(allocation => allocation.remaining_cents !== 0)
+  }, [summary, showZeroPayableAllocations])
+
   const monthClosed = summary?.month?.status === 'closed'
 
   const unsortedCategory = useMemo(
@@ -2617,10 +2671,15 @@ export default function WalletRoute() {
     }
   }, [balanceInput])
 
-  const balanceDifference = useMemo(() => {
+  const balanceDelta = useMemo(() => {
     if (!summary || parsedBalanceInputCents === null) return null
-    return parsedBalanceInputCents - summary.expected_balance_cents
+    return parsedBalanceInputCents - summary.wallet_balance_cents
   }, [parsedBalanceInputCents, summary])
+
+  const projectedExpectedBalance = useMemo(() => {
+    if (!summary || balanceDelta === null) return null
+    return summary.expected_balance_cents + balanceDelta
+  }, [balanceDelta, summary])
 
   const balanceChanged = useMemo(() => {
     if (!summary || parsedBalanceInputCents === null) return false
@@ -3028,9 +3087,6 @@ export default function WalletRoute() {
       await api.post(`/api/wallet/months/${monthKey}/balance-updates`, {
         new_balance_cents: parseCents(balanceInput, 'Wallet balance'),
         note: adjustmentNote || null,
-        create_adjustment: true,
-        adjustment_reason: adjustmentReason,
-        adjustment_note: adjustmentNote || null,
       })
       setAdjustmentNote('')
       setReconcileOpen(false)
@@ -3067,6 +3123,7 @@ export default function WalletRoute() {
   }
 
   const startAllocationBudgetEdit = (allocation) => {
+    setExpandedAllocationID(allocation.id)
     setAllocationBudgetEdit({
       id: allocation.id,
       amount: moneyInputValue(allocation.budgeted_cents),
@@ -3812,6 +3869,9 @@ export default function WalletRoute() {
             Refresh
           </button>
         </div>
+        {section === 'month' && summary && !loading && (
+          <WalletBalanceSummary summary={summary} className="wallet-mobile-balance-summary" />
+        )}
       </header>
 
       {error && (
@@ -3974,6 +4034,38 @@ export default function WalletRoute() {
         />
       ) : (
         <>
+          <WalletBalanceSummary summary={summary} className="wallet-desktop-balance-summary" />
+
+          <section className="wallet-balance-panel">
+            <form onSubmit={submitBalance} className="wallet-balance-form">
+              <label>
+                <span>Wallet Balance</span>
+                <WalletField error={balanceErrors.amount}>
+                  <input
+                    value={balanceInput}
+                    onChange={event => setBalanceInput(event.target.value)}
+                    inputMode="decimal"
+                    disabled={monthClosed}
+                    {...withFieldError(balanceErrors.amount)}
+                  />
+                </WalletField>
+              </label>
+              <button type="submit" className="btn-ghost" disabled={saving || monthClosed || !balanceChanged || hasErrors(balanceErrors)}>
+                <Save size={13} />
+                Save Balance
+              </button>
+              <button
+                type="button"
+                className="btn-ghost"
+                disabled={saving || monthClosed || !balanceDelta || hasErrors(balanceErrors)}
+                onClick={() => setReconcileOpen(true)}
+              >
+                <AlertTriangle size={13} />
+                Reconcile
+              </button>
+            </form>
+          </section>
+
           <section className="wallet-panel wallet-mobile-capture-panel">
             <div className="wallet-panel-header">
               <div>
@@ -4003,144 +4095,109 @@ export default function WalletRoute() {
             />
           </section>
 
-          <RecentTransactionsPanel
-            transactions={summary.recent_transactions || []}
-            saving={saving}
-            monthClosed={monthClosed}
-            transactionAmountEdit={transactionAmountEdit}
-            transactionAmountEditDisplayErrors={transactionAmountEditDisplayErrors}
-            transactionAmountEditErrors={transactionAmountEditErrors}
-            startTransactionAmountEdit={startTransactionAmountEdit}
-            updateTransactionAmountEdit={updateTransactionAmountEdit}
-            setTransactionAmountEdit={setTransactionAmountEdit}
-            saveTransactionAmountEdit={saveTransactionAmountEdit}
-            openSplitModal={openSplitModal}
-            openSplitDetail={openSplitDetail}
-            deleteTransaction={deleteTransaction}
-            className="wallet-mobile-recent-panel"
-          />
-
-          <section className="wallet-summary-strip">
-            <SummaryMetric label="Opening" value={summary.month.opening_balance_cents} icon={Banknote} />
-            <SummaryMetric label="Income" value={summary.income_total_cents} tone="good" icon={Banknote} />
-            <SummaryMetric label="Wallet Balance" value={summary.wallet_balance_cents} icon={WalletIcon} />
-            <SummaryMetric label="Total Reserved" value={summary.total_reserved_cents} icon={PiggyBank} />
-            <SummaryMetric
-              label="Available"
-              value={summary.available_balance_cents}
-              tone={summary.available_balance_cents < 0 ? 'bad' : 'good'}
-              icon={Banknote}
-            />
-            <SummaryMetric
-              label="Variance"
-              value={summary.variance_cents}
-              tone={summary.variance_cents === 0 ? 'good' : 'warn'}
-              icon={AlertTriangle}
-            />
-          </section>
-
-          <section className="wallet-balance-panel">
-            <form onSubmit={submitBalance} className="wallet-balance-form">
-              <label>
-                <span>Wallet Balance</span>
-                <WalletField error={balanceErrors.amount}>
-                  <input
-                    value={balanceInput}
-                    onChange={event => setBalanceInput(event.target.value)}
-                    inputMode="decimal"
-                    disabled={monthClosed}
-                    {...withFieldError(balanceErrors.amount)}
-                  />
-                </WalletField>
-              </label>
-              <button type="submit" className="btn-ghost" disabled={saving || monthClosed || !balanceChanged || hasErrors(balanceErrors)}>
-                <Save size={13} />
-                Save Balance
-              </button>
-              <button
-                type="button"
-                className="btn-ghost"
-                disabled={saving || monthClosed || !balanceDifference || hasErrors(balanceErrors)}
-                onClick={() => setReconcileOpen(true)}
-              >
-                <AlertTriangle size={13} />
-                Reconcile
-              </button>
-            </form>
-            <div className="wallet-review-strip">
-              <span>{summary.month.status}</span>
-              <span>Expected {formatMoney(summary.expected_balance_cents)}</span>
-              {balanceDifference !== null && <span>Difference {formatMoney(balanceDifference)}</span>}
-              <span>{summary.review_counts.unsorted_count} unsorted / {formatMoney(summary.review_counts.unsorted_cents)}</span>
-              <span>{summary.review_counts.rounded_count} rounded / {formatMoney(summary.review_counts.rounded_cents)}</span>
-            </div>
-          </section>
-
           <div className="wallet-grid">
             <section className="wallet-panel wallet-allocations-panel">
               <div className="wallet-panel-header">
                 <div>
                   <span className="wallet-section-label">Allocations</span>
-                  <strong>{summary.allocations.length} envelopes</strong>
                 </div>
+                <label className="wallet-allocation-zero-toggle">
+                  <input
+                    type="checkbox"
+                    checked={showZeroPayableAllocations}
+                    onChange={event => setShowZeroPayableAllocations(event.target.checked)}
+                    aria-label="Show zero payable envelopes"
+                  />
+                  <i aria-hidden="true" />
+                  <span>Zero payables</span>
+                </label>
               </div>
               <div className="wallet-allocation-list">
                 {summary.allocations.length === 0 ? (
                   <div className="wallet-empty-row">No allocations yet.</div>
-                ) : summary.allocations.map(allocation => {
-                  const usage = allocation.budgeted_cents > 0
-                    ? Math.min(100, Math.round((allocation.spent_cents / allocation.budgeted_cents) * 100))
-                    : 0
-                  const editingBudget = allocationBudgetEdit?.id === allocation.id
-                  return (
-                    <div key={allocation.id} className={`wallet-allocation-row ${allocation.remaining_cents < 0 ? 'is-overspent' : ''}`}>
-                      <div className="wallet-allocation-main">
-                        <strong>{allocation.name}</strong>
-                        <span>{typeLabel(allocation.type)} / initial allocation {formatMoney(allocation.budgeted_cents)}</span>
-                      </div>
-                      <div className="wallet-allocation-side">
-                        <div className="wallet-allocation-money">
-                          <span className="wallet-money-label">{allocation.remaining_cents < 0 ? 'Overspent' : 'Amount left'}</span>
-                          <strong>{formatMoney(allocation.remaining_cents)}</strong>
-                          <span>{formatMoney(allocation.spent_cents)} spent</span>
-                        </div>
-                        <button
-                          type="button"
-                          className="btn-ghost wallet-allocation-edit-btn"
-                          onClick={() => startAllocationBudgetEdit(allocation)}
-                          disabled={saving || monthClosed}
-                          title="Edit initial allocation"
-                        >
-                          <Pencil size={13} />
-                        </button>
-                      </div>
-                      <div className="wallet-progress">
-                        <i style={{ width: `${usage}%` }} />
-                      </div>
-                      {editingBudget && (
-                        <form onSubmit={saveAllocationBudgetEdit} className="wallet-allocation-budget-form">
-                          <WalletField error={allocationBudgetEditDisplayErrors.amount}>
-                            <input
-                              value={allocationBudgetEdit.amount}
-                              onChange={event => updateAllocationBudgetEdit({ amount: event.target.value })}
-                              onBlur={() => updateAllocationBudgetEdit({ touched: { ...(allocationBudgetEdit.touched || {}), amount: true } })}
-                              inputMode="decimal"
-                              aria-label={`${allocation.name} initial allocation amount`}
-                              {...withFieldError(allocationBudgetEditDisplayErrors.amount)}
-                            />
-                          </WalletField>
-                          <button type="button" className="btn-ghost" onClick={() => setAllocationBudgetEdit(null)} disabled={saving}>
-                            Cancel
-                          </button>
-                          <button type="submit" className="btn-primary" disabled={saving || hasErrors(allocationBudgetEditErrors)}>
-                            <Save size={13} />
-                            Save
-                          </button>
-                        </form>
-                      )}
+                ) : (
+                  <>
+                    <div className="wallet-allocation-header-row">
+                      <span>Envelope</span>
+                      <span>Amount Payable</span>
+                      <span aria-hidden="true" />
                     </div>
-                  )
-                })}
+                    {visibleAllocations.length === 0 ? (
+                      <div className="wallet-empty-row">No payable envelopes.</div>
+                    ) : visibleAllocations.map(allocation => {
+                      const editingBudget = allocationBudgetEdit?.id === allocation.id
+                      const expanded = expandedAllocationID === allocation.id || editingBudget
+                      return (
+                        <div key={allocation.id} className={`wallet-allocation-row ${allocation.remaining_cents < 0 ? 'is-overspent' : ''} ${allocation.remaining_cents === 0 ? 'is-zero-payable' : ''} ${expanded ? 'is-expanded' : ''}`}>
+                          <div className="wallet-allocation-summary-row">
+                            <strong title={allocation.name}>{allocation.name}</strong>
+                            <strong className="wallet-allocation-payable">{formatMoney(allocation.remaining_cents)}</strong>
+                            <button
+                              type="button"
+                              className="btn-ghost wallet-allocation-expand-btn"
+                              onClick={() => {
+                                const nextExpanded = expandedAllocationID === allocation.id ? '' : allocation.id
+                                setExpandedAllocationID(nextExpanded)
+                                if (nextExpanded !== allocation.id && editingBudget) setAllocationBudgetEdit(null)
+                              }}
+                              aria-expanded={expanded}
+                              title={expanded ? 'Collapse envelope' : 'Expand envelope'}
+                            >
+                              {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                            </button>
+                          </div>
+                          {expanded && (
+                            <div className="wallet-allocation-detail-row">
+                              <div>
+                                <span>Type</span>
+                                <strong>{typeLabel(allocation.type)}</strong>
+                              </div>
+                              <div>
+                                <span>Initial Allocation</span>
+                                <strong>{formatMoney(allocation.budgeted_cents)}</strong>
+                              </div>
+                              <div>
+                                <span>Amount Paid</span>
+                                <strong>{formatMoney(allocation.spent_cents)}</strong>
+                              </div>
+                              <button
+                                type="button"
+                                className="btn-ghost wallet-allocation-edit-btn"
+                                onClick={() => startAllocationBudgetEdit(allocation)}
+                                disabled={saving || monthClosed}
+                                title="Edit initial allocation"
+                              >
+                                <Pencil size={13} />
+                                Edit
+                              </button>
+                            </div>
+                          )}
+                          {expanded && editingBudget && (
+                            <form onSubmit={saveAllocationBudgetEdit} className="wallet-allocation-budget-form">
+                              <WalletField error={allocationBudgetEditDisplayErrors.amount}>
+                                <input
+                                  value={allocationBudgetEdit.amount}
+                                  onChange={event => updateAllocationBudgetEdit({ amount: event.target.value })}
+                                  onBlur={() => updateAllocationBudgetEdit({ touched: { ...(allocationBudgetEdit.touched || {}), amount: true } })}
+                                  inputMode="decimal"
+                                  aria-label={`${allocation.name} initial allocation amount`}
+                                  {...withFieldError(allocationBudgetEditDisplayErrors.amount)}
+                                />
+                              </WalletField>
+                              <button type="button" className="btn-ghost" onClick={() => setAllocationBudgetEdit(null)} disabled={saving}>
+                                Cancel
+                              </button>
+                              <button type="submit" className="btn-primary" disabled={saving || hasErrors(allocationBudgetEditErrors)}>
+                                <Save size={13} />
+                                Save
+                              </button>
+                            </form>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </>
+                )}
               </div>
               <form onSubmit={submitAllocation} className="wallet-inline-form">
                 <WalletField error={allocationDisplayErrors.name}>
@@ -4341,6 +4398,23 @@ export default function WalletRoute() {
             openSplitModal={openSplitModal}
             openSplitDetail={openSplitDetail}
             deleteTransaction={deleteTransaction}
+            className="wallet-mobile-recent-panel"
+          />
+
+          <RecentTransactionsPanel
+            transactions={summary.recent_transactions || []}
+            saving={saving}
+            monthClosed={monthClosed}
+            transactionAmountEdit={transactionAmountEdit}
+            transactionAmountEditDisplayErrors={transactionAmountEditDisplayErrors}
+            transactionAmountEditErrors={transactionAmountEditErrors}
+            startTransactionAmountEdit={startTransactionAmountEdit}
+            updateTransactionAmountEdit={updateTransactionAmountEdit}
+            setTransactionAmountEdit={setTransactionAmountEdit}
+            saveTransactionAmountEdit={saveTransactionAmountEdit}
+            openSplitModal={openSplitModal}
+            openSplitDetail={openSplitDetail}
+            deleteTransaction={deleteTransaction}
           />
         </>
       )}
@@ -4389,26 +4463,18 @@ export default function WalletRoute() {
               <SummaryMetric label="Previous Wallet" value={summary.wallet_balance_cents} />
               <SummaryMetric label="New Wallet" value={parsedBalanceInputCents || 0} />
               <SummaryMetric label="Expected" value={summary.expected_balance_cents} />
-              <SummaryMetric label="Adjustment" value={balanceDifference || 0} tone={(balanceDifference || 0) === 0 ? 'good' : 'warn'} />
+              <SummaryMetric label="After Entry" value={projectedExpectedBalance || summary.expected_balance_cents} />
+              <SummaryMetric label="Change" value={balanceDelta || 0} tone={(balanceDelta || 0) > 0 ? 'good' : 'bad'} />
             </div>
             <label>
-              <span>Reason</span>
-              <select value={adjustmentReason} onChange={event => setAdjustmentReason(event.target.value)}>
-                <option value="rounding">Rounding Adjustment</option>
-                <option value="missed_transaction">Missed Transaction</option>
-                <option value="cash_variance">Cash Variance</option>
-                <option value="manual_correction">Manual Correction</option>
-              </select>
-            </label>
-            <label>
-              <span>Adjustment Note</span>
+              <span>Note</span>
               <input value={adjustmentNote} onChange={event => setAdjustmentNote(event.target.value)} placeholder="Optional" />
             </label>
             <div className="wallet-modal-actions">
               <button type="button" className="btn-ghost" onClick={() => setReconcileOpen(false)}>Cancel</button>
-              <button type="submit" className="btn-primary" disabled={saving || !balanceDifference || hasErrors(balanceErrors)}>
+              <button type="submit" className="btn-primary" disabled={saving || !balanceDelta || hasErrors(balanceErrors)}>
                 <Save size={14} />
-                Save Adjustment
+                Save Balance Update
               </button>
             </div>
           </form>

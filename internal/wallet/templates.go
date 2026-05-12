@@ -265,7 +265,8 @@ func sanitizeDefaultCategoryIDs(ctx context.Context, q shared.SQLer, ids []strin
 			continue
 		}
 		var count int
-		if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM wallet_categories WHERE id = ? AND active = 1`, id).Scan(&count); err != nil {
+		if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM wallet_categories
+			WHERE id = ? AND active = 1 AND `+visibleCategoryCondition(""), id).Scan(&count); err != nil {
 			return nil, fmt.Errorf("check wallet default category: %w", err)
 		}
 		if count == 0 {
@@ -414,9 +415,9 @@ func (r *Repository) DeleteIncomeTemplate(ctx context.Context, id string) error 
 }
 
 func (r *Repository) ListCategoriesAll(ctx context.Context, includeInactive bool) ([]Category, error) {
-	where := ""
+	where := "WHERE " + visibleCategoryCondition("")
 	if !includeInactive {
-		where = "WHERE active = 1"
+		where += " AND active = 1"
 	}
 	rows, err := r.db.QueryContext(ctx, `SELECT id, name, system_key, active, sort_order, created_at, updated_at
 		FROM wallet_categories `+where+`
@@ -482,6 +483,9 @@ func (r *Repository) UpdateCategory(ctx context.Context, id string, patch map[st
 			return Category{}, errors.New("Unsorted category cannot be deactivated")
 		}
 	}
+	if current.SystemKey != nil && *current.SystemKey == ReconciliationCategorySystemKey {
+		return Category{}, errors.New("Adjustment category cannot be edited")
+	}
 	if raw, ok := patch["name"]; ok {
 		current.Name, err = shared.ParseRequiredString(raw)
 		if err != nil || current.Name == "" {
@@ -522,7 +526,18 @@ func (r *Repository) DeleteCategory(ctx context.Context, id string) error {
 	if category.SystemKey != nil && *category.SystemKey == "unsorted" {
 		return errors.New("Unsorted category cannot be deleted")
 	}
+	if category.SystemKey != nil && *category.SystemKey == ReconciliationCategorySystemKey {
+		return errors.New("Adjustment category cannot be deleted")
+	}
 	return deleteByID(ctx, r.db, "wallet_categories", id)
+}
+
+func visibleCategoryCondition(alias string) string {
+	column := "system_key"
+	if strings.TrimSpace(alias) != "" {
+		column = alias + ".system_key"
+	}
+	return "(" + column + " IS NULL OR " + column + " <> '" + ReconciliationCategorySystemKey + "')"
 }
 
 func listActiveAllocationTemplates(ctx context.Context, q shared.SQLer) ([]AllocationTemplate, error) {

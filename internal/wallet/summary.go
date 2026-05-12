@@ -16,6 +16,11 @@ func (r *Repository) Summary(ctx context.Context, monthKey string) (MonthSummary
 	if err != nil {
 		return MonthSummary{}, err
 	}
+	incomeTransactionTotal, err := r.incomeTransactionTotal(ctx, month.ID)
+	if err != nil {
+		return MonthSummary{}, err
+	}
+	incomeTotal += incomeTransactionTotal
 	allocations, totalReserved, spendingTotal, err := r.listAllocationSummaries(ctx, month.ID)
 	if err != nil {
 		return MonthSummary{}, err
@@ -44,7 +49,7 @@ func (r *Repository) Summary(ctx context.Context, monthKey string) (MonthSummary
 	if err != nil {
 		return MonthSummary{}, err
 	}
-	expectedBalance := month.OpeningBalanceCents + incomeTotal - spendingTotal + adjustmentTotal
+	expectedBalance := month.OpeningBalanceCents + incomeTotal - spendingTotal
 	return MonthSummary{
 		Month:                 month,
 		IncomeItems:           incomeItems,
@@ -117,11 +122,14 @@ func (r *Repository) listAllocationSummaries(ctx context.Context, monthID string
 		if err := scanner.scan(); err != nil {
 			return nil, 0, 0, err
 		}
+		spendingTotal += spent
+		if isReconciliationAllocationName(allocation.Name) {
+			continue
+		}
 		remaining := allocation.BudgetedCents - spent
 		if allocation.Active && remaining > 0 {
 			totalReserved += remaining
 		}
-		spendingTotal += spent
 		allocations = append(allocations, AllocationSummary{
 			Allocation:     allocation,
 			SpentCents:     spent,
@@ -136,6 +144,16 @@ func (r *Repository) listAllocationSummaries(ctx context.Context, monthID string
 		return nil, 0, 0, err
 	}
 	return allocations, totalReserved, spendingTotal, rows.Err()
+}
+
+func (r *Repository) incomeTransactionTotal(ctx context.Context, monthID string) (int64, error) {
+	var total int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(t.amount_cents), 0)
+		FROM wallet_transactions t
+		WHERE t.month_id = ? AND `+visibleIncomeCondition("t"), monthID).Scan(&total); err != nil {
+		return 0, fmt.Errorf("sum wallet income transactions: %w", err)
+	}
+	return total, nil
 }
 
 type allocationSpendScanner struct {
@@ -170,7 +188,7 @@ func (r *Repository) adjustmentTotal(ctx context.Context, monthID string) (int64
 
 func (r *Repository) recentTransactions(ctx context.Context, monthID string, limit int) ([]Transaction, error) {
 	rows, err := r.db.QueryContext(ctx, transactionSelectSQL()+`
-		WHERE t.month_id = ? AND t.kind = 'spend'
+		WHERE t.month_id = ? AND t.kind IN ('spend', 'income')
 		ORDER BY t.date DESC, t.created_at DESC
 		LIMIT ?`, monthID, limit)
 	if err != nil {
@@ -212,22 +230,31 @@ func (r *Repository) visibleTransactionCount(ctx context.Context, monthID string
 	var count int
 	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*)
 		FROM wallet_transactions t
-		WHERE t.month_id = ? AND `+visibleSpendCondition("t"), monthID).Scan(&count); err != nil {
+		WHERE t.month_id = ? AND `+visibleLedgerTransactionCondition("t"), monthID).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count wallet visible transactions: %w", err)
 	}
 	return count, nil
 }
 
 func visibleSpendCondition(alias string) string {
-	return alias + `.kind = 'spend' AND NOT EXISTS (
+	return alias + `.kind = 'spend' AND ` + visibleTransactionCondition(alias)
+}
+
+func visibleIncomeCondition(alias string) string {
+	return alias + `.kind = 'income' AND ` + visibleTransactionCondition(alias)
+}
+
+func visibleLedgerTransactionCondition(alias string) string {
+	return `((` + visibleSpendCondition(alias) + `) OR (` + visibleIncomeCondition(alias) + `))`
+}
+
+func visibleTransactionCondition(alias string) string {
+	return `NOT EXISTS (
 		SELECT 1 FROM wallet_transaction_splits visible_split
 		WHERE visible_split.parent_transaction_id = ` + alias + `.id
 	)`
 }
 
-func visibleTransactionCondition(alias string) string {
-	return `NOT EXISTS (
-		SELECT 1 FROM wallet_transaction_splits visible_transaction_split
-		WHERE visible_transaction_split.parent_transaction_id = ` + alias + `.id
-	)`
+func isReconciliationAllocationName(name string) bool {
+	return name == ReconciliationAllocationName
 }

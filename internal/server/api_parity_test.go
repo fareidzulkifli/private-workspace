@@ -223,11 +223,13 @@ func TestWalletAPISummaryFlow(t *testing.T) {
 	}
 	balanceUpdate := apiJSON[map[string]any](t, router, http.MethodPost, "/api/wallet/months/2026-05/balance-updates", jsonBody(map[string]any{
 		"new_balance_cents": 598100,
-		"create_adjustment": true,
-		"adjustment_reason": "rounding",
 	}), cookie, csrf, http.StatusCreated)
-	if balanceUpdate["adjustment"] == nil {
+	if balanceUpdate["adjustment"] != nil {
 		t.Fatalf("balance update = %#v", balanceUpdate)
+	}
+	reconciliationTransaction := balanceUpdate["transaction"].(map[string]any)
+	if reconciliationTransaction["kind"] != "income" || reconciliationTransaction["amount_cents"].(float64) != 100 {
+		t.Fatalf("reconciliation transaction = %#v", reconciliationTransaction)
 	}
 	split := apiJSON[map[string]any](t, router, http.MethodPost, "/api/wallet/transactions/"+transaction["id"].(string)+"/split", jsonBody(map[string]any{
 		"splits": []map[string]any{

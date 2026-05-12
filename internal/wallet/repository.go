@@ -56,6 +56,11 @@ func (r *Repository) ListMonthBook(ctx context.Context) ([]MonthBookRow, error) 
 		if err != nil {
 			return nil, err
 		}
+		incomeTransactionTotal, err := r.incomeTransactionTotal(ctx, month.ID)
+		if err != nil {
+			return nil, err
+		}
+		incomeTotal += incomeTransactionTotal
 		allocations, totalReserved, spendingTotal, err := r.listAllocationSummaries(ctx, month.ID)
 		if err != nil {
 			return nil, err
@@ -68,7 +73,7 @@ func (r *Repository) ListMonthBook(ctx context.Context) ([]MonthBookRow, error) 
 		if err != nil {
 			return nil, err
 		}
-		expectedBalance := month.OpeningBalanceCents + incomeTotal - spendingTotal + adjustmentTotal
+		expectedBalance := month.OpeningBalanceCents + incomeTotal - spendingTotal
 		book = append(book, MonthBookRow{
 			ID:                       month.ID,
 			Month:                    month.Month,
@@ -203,7 +208,7 @@ func (r *Repository) DeleteMonth(ctx context.Context, monthKey string) error {
 func (r *Repository) ListCategories(ctx context.Context) ([]Category, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT id, name, system_key, active, sort_order, created_at, updated_at
 		FROM wallet_categories
-		WHERE active = 1
+		WHERE active = 1 AND `+visibleCategoryCondition("")+`
 		ORDER BY sort_order ASC, name ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list wallet categories: %w", err)
@@ -589,7 +594,7 @@ func (r *Repository) UpdateTransaction(ctx context.Context, id string, patch map
 		return Transaction{}, err
 	}
 	previousAmount := current.AmountCents
-	balanceRelevant := current.Kind == "spend" && current.ParentTransactionID == nil
+	balanceRelevant := (current.Kind == "spend" || current.Kind == "income") && current.ParentTransactionID == nil
 	if balanceRelevant {
 		hasChildren, err := r.transactionHasSplitChildren(ctx, current.ID)
 		if err != nil {
@@ -667,7 +672,7 @@ func (r *Repository) UpdateTransaction(ctx context.Context, id string, patch map
 		if !balanceRelevant {
 			return nil
 		}
-		return applyWalletBalanceDelta(ctx, tx, current.MonthID, previousAmount-current.AmountCents, current.UpdatedAt)
+		return applyWalletBalanceDelta(ctx, tx, current.MonthID, transactionEditBalanceDelta(current.Kind, previousAmount, current.AmountCents), current.UpdatedAt)
 	})
 	if err != nil {
 		return Transaction{}, err
@@ -697,7 +702,7 @@ func (r *Repository) DeleteTransaction(ctx context.Context, id string) error {
 		}
 		defer rows.Close()
 		var childIDs []string
-		var removedSpend int64
+		var balanceDelta int64
 		for rows.Next() {
 			var childID string
 			var childAmount int64
@@ -705,13 +710,13 @@ func (r *Repository) DeleteTransaction(ctx context.Context, id string) error {
 				return err
 			}
 			childIDs = append(childIDs, childID)
-			removedSpend += childAmount
+			balanceDelta += childAmount
 		}
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		if len(childIDs) == 0 && current.Kind == "spend" {
-			removedSpend = current.AmountCents
+		if len(childIDs) == 0 {
+			balanceDelta = transactionDeleteBalanceDelta(current.Kind, current.AmountCents)
 		}
 		for _, childID := range childIDs {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM wallet_transactions WHERE id = ?`, childID); err != nil {
@@ -725,8 +730,30 @@ func (r *Repository) DeleteTransaction(ctx context.Context, id string) error {
 		if ok, err := shared.QuerySingleResult(result); err == nil && !ok {
 			return shared.ErrNotFound
 		}
-		return applyWalletBalanceDelta(ctx, tx, current.MonthID, removedSpend, now)
+		return applyWalletBalanceDelta(ctx, tx, current.MonthID, balanceDelta, now)
 	})
+}
+
+func transactionEditBalanceDelta(kind string, previousAmount int64, currentAmount int64) int64 {
+	switch kind {
+	case "income":
+		return currentAmount - previousAmount
+	case "spend":
+		return previousAmount - currentAmount
+	default:
+		return 0
+	}
+}
+
+func transactionDeleteBalanceDelta(kind string, amount int64) int64 {
+	switch kind {
+	case "income":
+		return -amount
+	case "spend":
+		return amount
+	default:
+		return 0
+	}
 }
 
 func (r *Repository) ensureAllocationBelongsToMonth(ctx context.Context, allocationID string, monthID string) error {

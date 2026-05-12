@@ -10,7 +10,15 @@ import (
 	"private-workspace/internal/shared"
 )
 
-const UnsortedCategoryID = "wallet-category-unsorted"
+const (
+	UnsortedCategoryID = "wallet-category-unsorted"
+
+	ReconciliationAllocationName      = "Reconcillation Adjustment"
+	ReconciliationCategoryID          = "wallet-category-reconciliation-adjustment"
+	ReconciliationCategoryName        = "Adjustment"
+	ReconciliationCategorySystemKey   = "reconciliation_adjustment"
+	reconciliationAllocationSortOrder = 1_000_000
+)
 
 var validAllocationTypes = map[string]bool{
 	"fixed":        true,

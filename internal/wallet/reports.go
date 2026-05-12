@@ -76,6 +76,11 @@ func (r *Repository) MonthlyReport(ctx context.Context, from string, to string) 
 		if err != nil {
 			return nil, err
 		}
+		incomeTransactionTotal, err := r.incomeTransactionTotal(ctx, month.ID)
+		if err != nil {
+			return nil, err
+		}
+		incomeTotal += incomeTransactionTotal
 		_, totalReserved, spendingTotal, err := r.listAllocationSummaries(ctx, month.ID)
 		if err != nil {
 			return nil, err
@@ -84,7 +89,7 @@ func (r *Repository) MonthlyReport(ctx context.Context, from string, to string) 
 		if err != nil {
 			return nil, err
 		}
-		expected := month.OpeningBalanceCents + incomeTotal - spendingTotal + adjustmentTotal
+		expected := month.OpeningBalanceCents + incomeTotal - spendingTotal
 		report = append(report, MonthlyReportRow{
 			Month:                 month.Month,
 			Status:                month.Status,

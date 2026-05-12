@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"private-workspace/internal/shared"
 )
@@ -33,31 +35,19 @@ func (r *Repository) CreateBalanceUpdate(ctx context.Context, monthKey string, r
 		Note:                 optionalStringPtr(req.Note),
 		CreatedAt:            now,
 	}
-	var adjustment *ReconciliationAdjustment
-	if req.CreateAdjustment && update.DifferenceCents != 0 {
-		reason, err := normalizeAdjustmentReason(req.AdjustmentReason)
-		if err != nil {
-			return BalanceUpdateResult{}, err
-		}
-		adjustment = &ReconciliationAdjustment{
-			ID:              shared.NewID(),
-			MonthID:         month.ID,
-			BalanceUpdateID: &update.ID,
-			AmountCents:     update.DifferenceCents,
-			Reason:          reason,
-			Note:            optionalStringPtr(req.AdjustmentNote),
-			CreatedAt:       now,
-		}
-	}
+	balanceDelta := req.NewBalanceCents - month.WalletBalanceCents
+	var transactionID string
 
 	err = r.db.Tx(ctx, func(tx *sql.Tx) error {
 		if err := insertBalanceUpdate(ctx, tx, update); err != nil {
 			return err
 		}
-		if adjustment != nil {
-			if err := insertReconciliationAdjustment(ctx, tx, *adjustment); err != nil {
+		if balanceDelta != 0 {
+			transaction, err := createReconciliationTransaction(ctx, tx, month, balanceDelta, req.Note, now)
+			if err != nil {
 				return err
 			}
+			transactionID = transaction.ID
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE wallet_months
 			SET wallet_balance_cents = ?, updated_at = ?
@@ -69,7 +59,155 @@ func (r *Repository) CreateBalanceUpdate(ctx context.Context, monthKey string, r
 	if err != nil {
 		return BalanceUpdateResult{}, err
 	}
-	return BalanceUpdateResult{BalanceUpdate: update, Adjustment: adjustment}, nil
+	result := BalanceUpdateResult{BalanceUpdate: update}
+	if transactionID != "" {
+		transaction, err := r.GetTransaction(ctx, transactionID)
+		if err != nil {
+			return BalanceUpdateResult{}, err
+		}
+		result.Transaction = &transaction
+	}
+	return result, nil
+}
+
+func createReconciliationTransaction(ctx context.Context, q shared.SQLer, month Month, balanceDelta int64, note *string, now string) (Transaction, error) {
+	allocationID, err := ensureReconciliationAllocation(ctx, q, month.ID, now)
+	if err != nil {
+		return Transaction{}, err
+	}
+	categoryID, err := ensureReconciliationCategory(ctx, q, now)
+	if err != nil {
+		return Transaction{}, err
+	}
+
+	kind := "income"
+	amount := balanceDelta
+	if balanceDelta < 0 {
+		kind = "spend"
+		amount = -balanceDelta
+	}
+	transaction := Transaction{
+		ID:             shared.NewID(),
+		MonthID:        month.ID,
+		AllocationID:   allocationID,
+		CategoryID:     categoryID,
+		Date:           reconciliationTransactionDate(month.Month),
+		AmountCents:    amount,
+		Note:           reconciliationTransactionNote(note),
+		Rounded:        false,
+		Kind:           kind,
+		Source:         "reconciliation",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		AllocationName: ReconciliationAllocationName,
+		CategoryName:   ReconciliationCategoryName,
+	}
+	if err := insertReconciliationTransaction(ctx, q, transaction); err != nil {
+		return Transaction{}, err
+	}
+	return transaction, nil
+}
+
+func ensureReconciliationAllocation(ctx context.Context, q shared.SQLer, monthID string, now string) (string, error) {
+	var id string
+	err := q.QueryRowContext(ctx, `SELECT id
+		FROM wallet_allocations
+		WHERE month_id = ? AND name = ?
+		ORDER BY active ASC, created_at ASC
+		LIMIT 1`, monthID, ReconciliationAllocationName).Scan(&id)
+	if err == nil {
+		if _, err := q.ExecContext(ctx, `UPDATE wallet_allocations
+			SET budgeted_cents = 0, type = 'flexible', carry_forward = 0, sort_order = ?, active = 0, updated_at = ?
+			WHERE id = ?`, reconciliationAllocationSortOrder, now, id); err != nil {
+			return "", fmt.Errorf("update wallet reconciliation allocation: %w", err)
+		}
+		return id, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("find wallet reconciliation allocation: %w", err)
+	}
+
+	id = shared.NewID()
+	if _, err := q.ExecContext(ctx, `INSERT INTO wallet_allocations
+		(id, month_id, name, budgeted_cents, type, carry_forward, sort_order, active, created_at, updated_at)
+		VALUES (?, ?, ?, 0, 'flexible', 0, ?, 0, ?, ?)`,
+		id, monthID, ReconciliationAllocationName, reconciliationAllocationSortOrder, now, now); err != nil {
+		return "", fmt.Errorf("create wallet reconciliation allocation: %w", err)
+	}
+	return id, nil
+}
+
+func ensureReconciliationCategory(ctx context.Context, q shared.SQLer, now string) (string, error) {
+	var id string
+	err := q.QueryRowContext(ctx, `SELECT id
+		FROM wallet_categories
+		WHERE id = ? OR system_key = ?
+		ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END
+		LIMIT 1`, ReconciliationCategoryID, ReconciliationCategorySystemKey, ReconciliationCategoryID).Scan(&id)
+	if err == nil {
+		if _, err := q.ExecContext(ctx, `UPDATE wallet_categories
+			SET name = ?, system_key = ?, active = 1, sort_order = ?, updated_at = ?
+			WHERE id = ?`, ReconciliationCategoryName, ReconciliationCategorySystemKey, reconciliationAllocationSortOrder, now, id); err != nil {
+			return "", fmt.Errorf("update wallet reconciliation category: %w", err)
+		}
+		return id, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("find wallet reconciliation category: %w", err)
+	}
+
+	err = q.QueryRowContext(ctx, `SELECT id
+		FROM wallet_categories
+		WHERE name = ?
+		LIMIT 1`, ReconciliationCategoryName).Scan(&id)
+	if err == nil {
+		if _, err := q.ExecContext(ctx, `UPDATE wallet_categories
+			SET system_key = ?, active = 1, sort_order = ?, updated_at = ?
+			WHERE id = ?`, ReconciliationCategorySystemKey, reconciliationAllocationSortOrder, now, id); err != nil {
+			return "", fmt.Errorf("claim wallet reconciliation category: %w", err)
+		}
+		return id, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("find wallet adjustment category by name: %w", err)
+	}
+
+	if _, err := q.ExecContext(ctx, `INSERT INTO wallet_categories
+		(id, name, system_key, active, sort_order, created_at, updated_at)
+		VALUES (?, ?, ?, 1, ?, ?, ?)`,
+		ReconciliationCategoryID, ReconciliationCategoryName, ReconciliationCategorySystemKey, reconciliationAllocationSortOrder, now, now); err != nil {
+		return "", fmt.Errorf("create wallet reconciliation category: %w", err)
+	}
+	return ReconciliationCategoryID, nil
+}
+
+func insertReconciliationTransaction(ctx context.Context, q shared.SQLer, transaction Transaction) error {
+	_, err := q.ExecContext(ctx, `INSERT INTO wallet_transactions
+		(id, month_id, allocation_id, category_id, date, amount_cents, note, rounded, kind, source, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reconciliation', ?, ?)`,
+		transaction.ID, transaction.MonthID, transaction.AllocationID, transaction.CategoryID, transaction.Date,
+		transaction.AmountCents, shared.NullString(transaction.Note), boolInt(transaction.Rounded), transaction.Kind,
+		transaction.CreatedAt, transaction.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("create wallet reconciliation transaction: %w", err)
+	}
+	return nil
+}
+
+func reconciliationTransactionNote(note *string) *string {
+	if trimmed := optionalStringPtr(note); trimmed != nil {
+		return trimmed
+	}
+	value := "Reconcile balance"
+	return &value
+}
+
+func reconciliationTransactionDate(monthKey string) string {
+	today := time.Now().Format("2006-01-02")
+	if strings.HasPrefix(today, monthKey+"-") {
+		return today
+	}
+	return monthKey + "-01"
 }
 
 func (r *Repository) ListBalanceUpdates(ctx context.Context, monthKey string, limit int) ([]BalanceUpdate, error) {
@@ -184,17 +322,18 @@ func (r *Repository) expectedBalance(ctx context.Context, monthID string) (int64
 		WHERE month_id = ?`, monthID).Scan(&incomeTotal); err != nil {
 		return 0, fmt.Errorf("sum wallet income: %w", err)
 	}
+	incomeTransactionTotal, err := r.incomeTransactionTotal(ctx, monthID)
+	if err != nil {
+		return 0, err
+	}
+	incomeTotal += incomeTransactionTotal
 	var spendingTotal int64
 	if err := r.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(t.amount_cents), 0)
 		FROM wallet_transactions t
 		WHERE t.month_id = ? AND `+visibleSpendCondition("t"), monthID).Scan(&spendingTotal); err != nil {
 		return 0, fmt.Errorf("sum wallet spending: %w", err)
 	}
-	adjustmentTotal, err := r.adjustmentTotal(ctx, monthID)
-	if err != nil {
-		return 0, err
-	}
-	return opening + incomeTotal - spendingTotal + adjustmentTotal, nil
+	return opening + incomeTotal - spendingTotal, nil
 }
 
 func (r *Repository) ensureBalanceUpdateBelongsToMonth(ctx context.Context, balanceUpdateID string, monthID string) error {
