@@ -17,6 +17,7 @@ var validAllocationTypes = map[string]bool{
 	"flexible":     true,
 	"sinking_fund": true,
 	"one_off":      true,
+	"subscription": true,
 }
 
 var validAdjustmentReasons = map[string]bool{

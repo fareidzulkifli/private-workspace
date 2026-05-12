@@ -2412,6 +2412,54 @@ select.is-invalid {
   min-width: 0;
 }
 
+.wallet-settings-header-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.wallet-settings-totals {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.wallet-settings-totals span {
+  align-items: center;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  display: inline-flex;
+  font-size: 10px;
+  font-weight: 750;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 9px;
+  white-space: nowrap;
+}
+
+.wallet-settings-totals strong {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.wallet-settings-save-all {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  height: 32px;
+  padding: 0 11px;
+}
+
 .wallet-template-list {
   display: flex;
   flex-direction: column;
@@ -2617,6 +2665,12 @@ select.is-invalid {
   color: var(--error);
 }
 
+.wallet-unsaved-draft-modal {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+}
+
 @media (max-width: 1280px) {
   .wallet-summary-strip {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2772,6 +2826,21 @@ select.is-invalid {
 
   .wallet-allocation-budget-form {
     grid-template-columns: 1fr;
+  }
+
+  .wallet-settings-allocation-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .wallet-settings-header-actions {
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .wallet-settings-totals {
+    justify-content: flex-start;
   }
 
   .wallet-income-edit-actions,

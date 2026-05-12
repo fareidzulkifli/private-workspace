@@ -139,6 +139,64 @@ const categorySnapshot = (category) => ({
   active: category.active,
 })
 
+const templateAmountValue = (template) => (
+  template.amount_input ?? moneyInputValue(template.default_amount_cents)
+)
+
+const sameIdList = (left = [], right = []) => (
+  left.length === right.length && left.every((id, index) => id === right[index])
+)
+
+const templateAmountsMatch = (template, original) => {
+  const currentValue = templateAmountValue(template)
+  const originalValue = templateAmountValue(original)
+  try {
+    return parseCents(currentValue, 'Default amount') === parseCents(originalValue, 'Default amount')
+  } catch {
+    return String(currentValue ?? '') === String(originalValue ?? '')
+  }
+}
+
+const allocationTemplateAmountCents = (template) => {
+  try {
+    return parseCents(templateAmountValue(template), 'Default amount')
+  } catch {
+    return template.default_amount_cents || 0
+  }
+}
+
+const allocationTemplateHasDraft = (template) => {
+  const original = template?._wallet_original
+  if (!original) return false
+  return (
+    template.name !== original.name ||
+    !templateAmountsMatch(template, original) ||
+    template.type !== original.type ||
+    !!template.carry_forward !== !!original.carry_forward ||
+    !!template.active !== !!original.active ||
+    !sameIdList(templateCategoryIds(template), templateCategoryIds(original))
+  )
+}
+
+const normalizeSavedAllocationTemplate = (template) => ({
+  ...template,
+  amount_input: undefined,
+  default_category_ids: categoryIds(template.default_categories || []),
+  _wallet_original: null,
+})
+
+const mergeAllocationTemplateDrafts = (nextSettings, currentSettings) => {
+  const draftTemplates = (currentSettings?.allocation_templates || []).filter(allocationTemplateHasDraft)
+  if (draftTemplates.length === 0) return nextSettings
+  const draftsById = new Map(draftTemplates.map(template => [template.id, template]))
+  return {
+    ...nextSettings,
+    allocation_templates: (nextSettings?.allocation_templates || []).map(template => (
+      draftsById.has(template.id) ? { ...template, ...draftsById.get(template.id) } : template
+    )),
+  }
+}
+
 const withFieldError = (error) => ({
   'aria-invalid': !!error,
   className: error ? 'is-invalid' : undefined,
@@ -178,6 +236,7 @@ const typeLabel = (type) => ({
   flexible: 'Flexible',
   sinking_fund: 'Sinking Fund',
   one_off: 'One-Off',
+  subscription: 'Subscription',
 }[type] || 'Flexible')
 
 function WalletModal({ title, onClose, children, wide = false }) {
@@ -617,6 +676,7 @@ function WalletSettingsView({
   updateSettingsList,
   submitAllocationTemplate,
   saveAllocationTemplate,
+  saveAllocationTemplates,
   deleteAllocationTemplate,
   submitIncomeTemplate,
   saveIncomeTemplate,
@@ -627,12 +687,21 @@ function WalletSettingsView({
   reorderSettingsList,
 }) {
   const categories = settings?.categories || []
+  const allocationTemplates = settings?.allocation_templates || []
   const activeCategories = categories.filter(category => category.active || category.system_key === 'unsorted')
   const [categoryPicker, setCategoryPicker] = useState(null)
   const [rowSaveAttempts, setRowSaveAttempts] = useState({})
   const [newFormTouched, setNewFormTouched] = useState({})
   const [sortDrag, setSortDrag] = useState(null)
   const sortDragRef = useRef(null)
+  const allocationTemplateDrafts = allocationTemplates.filter(allocationTemplateHasDraft)
+  const allocationTemplateTotals = allocationTemplates.reduce((totals, template) => {
+    const amount = allocationTemplateAmountCents(template)
+    return {
+      total: totals.total + amount,
+      active: template.active ? totals.active + amount : totals.active,
+    }
+  }, { total: 0, active: 0 })
   const templateFormErrors = {
     name: validateName(templateForm.name, 'Allocation template name'),
     amount: validateAmount(templateForm.amount, 'Default amount', { nonNegative: true }),
@@ -677,6 +746,15 @@ function WalletSettingsView({
   const markRowSaveAttempt = (key, id) => {
     setRowSaveAttempts(prev => ({ ...prev, [rowAttemptKey(key, id)]: true }))
   }
+  const markRowSaveAttempts = (key, items) => {
+    setRowSaveAttempts(prev => {
+      const next = { ...prev }
+      items.forEach(item => {
+        next[rowAttemptKey(key, item.id)] = true
+      })
+      return next
+    })
+  }
   const clearRowSaveAttempt = (key, id) => {
     setRowSaveAttempts(prev => {
       const next = { ...prev }
@@ -684,6 +762,10 @@ function WalletSettingsView({
       return next
     })
   }
+  const allocationTemplateRowErrors = (template) => ({
+    name: validateName(template.name, 'Allocation template name'),
+    amount: validateAmount(template.amount_input ?? moneyInputValue(template.default_amount_cents), 'Default amount', { nonNegative: true }),
+  })
   const snapshotForSettingsItem = (key, item) => {
     if (item._wallet_original) return item._wallet_original
     if (key === 'allocation_templates') return allocationTemplateSnapshot(item)
@@ -706,9 +788,9 @@ function WalletSettingsView({
     clearRowSaveAttempt(key, item.id)
   }
   const handleSettingsRowBlur = (key, item, event) => {
+    if (key === 'allocation_templates') return
     const row = event.currentTarget
     window.setTimeout(() => {
-      if (key === 'allocation_templates' && categoryPicker?.templateId === item.id) return
       if (row.contains(document.activeElement)) return
       revertSettingsItem(key, item)
     }, 0)
@@ -753,6 +835,7 @@ function WalletSettingsView({
   const beginSortDrag = (key, item, event) => {
     if (saving || (event.pointerType === 'mouse' && event.button !== 0)) return
     event.preventDefault()
+    if (key === 'allocation_templates' && allocationTemplateDrafts.length > 0) return
     if (item?._wallet_original) revertSettingsItem(key, item)
     const drag = { key, sourceId: item.id, targetId: item.id }
     sortDragRef.current = drag
@@ -820,6 +903,15 @@ function WalletSettingsView({
     const saved = await submitCategory(event)
     if (saved) setNewFormTouched(prev => ({ ...prev, category: {} }))
   }
+  const handleSaveAllocationTemplateDrafts = async () => {
+    if (allocationTemplateDrafts.length === 0) return
+    markRowSaveAttempts('allocation_templates', allocationTemplateDrafts)
+    if (allocationTemplateDrafts.some(template => hasErrors(allocationTemplateRowErrors(template)))) return
+    const saved = await saveAllocationTemplates(allocationTemplateDrafts)
+    if (saved) {
+      allocationTemplateDrafts.forEach(template => clearRowSaveAttempt('allocation_templates', template.id))
+    }
+  }
   const updateCategoryPickerSelection = (next) => {
     if (categoryPicker?.kind === 'template-form') {
       setTemplateForm(prev => ({ ...prev, defaultCategoryIds: next }))
@@ -833,14 +925,29 @@ function WalletSettingsView({
   return (
     <div className="wallet-settings-grid">
       <section className="wallet-panel wallet-settings-panel">
-        <div className="wallet-panel-header">
+        <div className="wallet-panel-header wallet-settings-allocation-header">
           <div>
             <span className="wallet-section-label">Defaults</span>
             <strong>Allocation Templates</strong>
           </div>
+          <div className="wallet-settings-header-actions">
+            <div className="wallet-settings-totals" aria-label="Allocation template totals">
+              <span>Allocated <strong>{formatMoney(allocationTemplateTotals.total)}</strong></span>
+              <span>Active Allocated <strong>{formatMoney(allocationTemplateTotals.active)}</strong></span>
+            </div>
+            <button
+              type="button"
+              className="btn-primary wallet-settings-save-all"
+              onClick={handleSaveAllocationTemplateDrafts}
+              disabled={saving || allocationTemplateDrafts.length === 0}
+            >
+              <Save size={13} />
+              Save
+            </button>
+          </div>
         </div>
         <div className="wallet-template-list">
-          {(settings?.allocation_templates || []).map(template => (
+          {allocationTemplates.map(template => (
             <div
               key={template.id}
               className={sortRowClass('allocation_templates', template.id, 'wallet-template-row')}
@@ -851,16 +958,13 @@ function WalletSettingsView({
             >
               {(() => {
                 const selectedCategoryIds = templateCategoryIds(template)
-                const rowErrors = {
-                  name: validateName(template.name, 'Allocation template name'),
-                  amount: validateAmount(template.amount_input ?? moneyInputValue(template.default_amount_cents), 'Default amount', { nonNegative: true }),
-                }
+                const rowErrors = allocationTemplateRowErrors(template)
                 const displayErrors = rowAttempted('allocation_templates', template.id) ? rowErrors : {}
                 return (
                   <>
                     <SettingsSortHandle
                       label={`Reorder ${template.name}`}
-                      disabled={saving}
+                      disabled={saving || allocationTemplateDrafts.length > 0}
                       onPointerDown={event => beginSortDrag('allocation_templates', template, event)}
                       onPointerMove={updateSortDrag}
                       onPointerUp={endSortDrag}
@@ -892,6 +996,7 @@ function WalletSettingsView({
                       <option value="fixed">Fixed</option>
                       <option value="sinking_fund">Sinking Fund</option>
                       <option value="one_off">One-Off</option>
+                      <option value="subscription">Subscription</option>
                     </select>
                     <AllocationCategoryButton
                       count={selectedCategoryIds.length}
@@ -953,6 +1058,7 @@ function WalletSettingsView({
             <option value="fixed">Fixed</option>
             <option value="sinking_fund">Sinking Fund</option>
             <option value="one_off">One-Off</option>
+            <option value="subscription">Subscription</option>
           </select>
           <label className="wallet-settings-check">
             <input
@@ -1303,6 +1409,7 @@ function MonthPreviewPanel({
                     <option value="fixed">Fixed</option>
                     <option value="sinking_fund">Sinking Fund</option>
                     <option value="one_off">One-Off</option>
+                    <option value="subscription">Subscription</option>
                   </select>
                   <label className="wallet-settings-check">
                     <input
@@ -1575,6 +1682,7 @@ function WalletReviewView({
                   <option value="fixed">Fixed</option>
                   <option value="sinking_fund">Sinking Fund</option>
                   <option value="one_off">One-Off</option>
+                  <option value="subscription">Subscription</option>
                 </select>
                 <label className="wallet-settings-check">
                   <input
@@ -2114,6 +2222,30 @@ function MonthDeleteConfirmModal({ target, value, setValue, saving, onClose, onC
   )
 }
 
+function UnsavedSettingsDraftModal({ draftCount, onCancel, onDiscard }) {
+  return (
+    <WalletModal title="Unsaved Allocation Drafts" onClose={onCancel}>
+      <div className="wallet-unsaved-draft-modal">
+        <div className="wallet-alert wallet-danger-alert">
+          <AlertTriangle size={14} />
+          <span>
+            {draftCount === 1
+              ? 'One allocation template has unsaved edits. Leaving settings will discard that draft.'
+              : `${draftCount} allocation templates have unsaved edits. Leaving settings will discard those drafts.`}
+          </span>
+        </div>
+        <div className="wallet-modal-actions">
+          <button type="button" className="btn-ghost" onClick={onCancel}>Keep Editing</button>
+          <button type="button" className="btn-primary wallet-danger-action" onClick={onDiscard}>
+            <Trash2 size={14} />
+            Leave Without Saving
+          </button>
+        </div>
+      </div>
+    </WalletModal>
+  )
+}
+
 export default function WalletRoute() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -2137,6 +2269,7 @@ export default function WalletRoute() {
   const [bookDeleteConfirm, setBookDeleteConfirm] = useState('')
   const [summary, setSummary] = useState(null)
   const [settings, setSettings] = useState(null)
+  const [settingsLeaveConfirm, setSettingsLeaveConfirm] = useState(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
@@ -2195,6 +2328,7 @@ export default function WalletRoute() {
   const transactionAmountInputRef = useRef(null)
   const mobileTransactionAmountInputRef = useRef(null)
   const sheetTransactionAmountInputRef = useRef(null)
+  const previousIsSettingsRef = useRef(isSettings)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -2212,7 +2346,7 @@ export default function WalletRoute() {
       setMonths(monthList)
       setMonthBookRows(bookRows)
       setSummary(monthSummary)
-      setSettings(walletSettings)
+      setSettings(prev => isSettings ? mergeAllocationTemplateDrafts(walletSettings, prev) : walletSettings)
       setBalanceInput(monthSummary ? moneyInputValue(monthSummary.wallet_balance_cents) : '')
       if (monthSummary) setMonthPreview(null)
     } catch (err) {
@@ -2220,11 +2354,100 @@ export default function WalletRoute() {
     } finally {
       setLoading(false)
     }
-  }, [monthKey])
+  }, [isSettings, monthKey])
 
   useEffect(() => {
     load()
   }, [load])
+
+  const allocationTemplateDraftCount = useMemo(
+    () => (settings?.allocation_templates || []).filter(allocationTemplateHasDraft).length,
+    [settings]
+  )
+  const hasAllocationTemplateDrafts = allocationTemplateDraftCount > 0
+
+  const discardAllocationTemplateDrafts = useCallback(() => {
+    setSettings(prev => {
+      const templates = prev?.allocation_templates || []
+      if (!templates.some(template => template._wallet_original)) return prev
+      return {
+        ...prev,
+        allocation_templates: templates.map(template => (
+          template._wallet_original
+            ? { ...template, ...template._wallet_original, _wallet_original: null }
+            : template
+        )),
+      }
+    })
+  }, [])
+
+  const requestSettingsLeave = useCallback((action) => {
+    if (isSettings && hasAllocationTemplateDrafts) {
+      setSettingsLeaveConfirm({ action })
+      return false
+    }
+    action()
+    return true
+  }, [hasAllocationTemplateDrafts, isSettings])
+
+  useEffect(() => {
+    if (!isSettings || !hasAllocationTemplateDrafts) return undefined
+    const handleDocumentClick = (event) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.shiftKey
+      ) {
+        return
+      }
+      if (!(event.target instanceof Element)) return
+      const anchor = event.target.closest('a[href]')
+      if (!anchor || (anchor.target && anchor.target !== '_self') || anchor.hasAttribute('download')) return
+      const url = new URL(anchor.href, window.location.href)
+      if (url.origin !== window.location.origin || url.pathname === '/wallet/settings') return
+      event.preventDefault()
+      event.stopPropagation()
+      requestSettingsLeave(() => navigate(`${url.pathname}${url.search}${url.hash}`))
+    }
+    document.addEventListener('click', handleDocumentClick, true)
+    return () => document.removeEventListener('click', handleDocumentClick, true)
+  }, [hasAllocationTemplateDrafts, isSettings, navigate, requestSettingsLeave])
+
+  useEffect(() => {
+    if (!isSettings || !hasAllocationTemplateDrafts) return undefined
+    const handleBeforeUnload = (event) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [hasAllocationTemplateDrafts, isSettings])
+
+  useEffect(() => {
+    if (previousIsSettingsRef.current && !isSettings) {
+      discardAllocationTemplateDrafts()
+      setSettingsLeaveConfirm(null)
+    }
+    previousIsSettingsRef.current = isSettings
+  }, [discardAllocationTemplateDrafts, isSettings])
+
+  useEffect(() => {
+    if (!hasAllocationTemplateDrafts) setSettingsLeaveConfirm(null)
+  }, [hasAllocationTemplateDrafts])
+
+  const cancelSettingsLeave = () => {
+    setSettingsLeaveConfirm(null)
+  }
+
+  const confirmSettingsLeave = () => {
+    const action = settingsLeaveConfirm?.action
+    setSettingsLeaveConfirm(null)
+    discardAllocationTemplateDrafts()
+    action?.()
+  }
 
   const activeAllocations = useMemo(
     () => (summary?.allocations || []).filter(allocation => allocation.active),
@@ -2564,17 +2787,21 @@ export default function WalletRoute() {
   }
 
   const viewBookMonth = (selectedMonth) => {
-    setMonthKey(selectedMonth)
-    setMonthBookOpen(false)
-    setBookEditForm(null)
-    navigate('/wallet')
+    requestSettingsLeave(() => {
+      setMonthKey(selectedMonth)
+      setMonthBookOpen(false)
+      setBookEditForm(null)
+      navigate('/wallet')
+    })
   }
 
   const reportBookMonth = (selectedMonth) => {
-    setMonthKey(selectedMonth)
-    setMonthBookOpen(false)
-    setBookEditForm(null)
-    navigate('/wallet/reports')
+    requestSettingsLeave(() => {
+      setMonthKey(selectedMonth)
+      setMonthBookOpen(false)
+      setBookEditForm(null)
+      navigate('/wallet/reports')
+    })
   }
 
   const summarizeBookMonth = (row) => {
@@ -3102,6 +3329,24 @@ export default function WalletRoute() {
     }
   }
 
+  const allocationTemplatePatchPayload = (template) => ({
+    name: template.name,
+    default_amount_cents: parseCents(template.amount_input ?? moneyInputValue(template.default_amount_cents), 'Default amount'),
+    type: template.type,
+    carry_forward: !!template.carry_forward,
+    active: !!template.active,
+    default_category_ids: templateCategoryIds(template),
+    sort_order: template.sort_order || 0,
+  })
+
+  const mergeSavedAllocationTemplates = (savedTemplates) => {
+    const savedById = new Map(savedTemplates.map(template => [template.id, normalizeSavedAllocationTemplate(template)]))
+    setSettings(prev => ({
+      ...prev,
+      allocation_templates: (prev?.allocation_templates || []).map(template => savedById.get(template.id) || template),
+    }))
+  }
+
   const saveAllocationTemplate = async (template) => {
     const errors = {
       name: validateName(template.name, 'Allocation template name'),
@@ -3111,18 +3356,39 @@ export default function WalletRoute() {
     setSaving(true)
     setError(null)
     try {
-      await api.patch(`/api/wallet/allocation-templates/${template.id}`, {
-        name: template.name,
-        default_amount_cents: parseCents(template.amount_input ?? moneyInputValue(template.default_amount_cents), 'Default amount'),
-        type: template.type,
-        carry_forward: !!template.carry_forward,
-        active: !!template.active,
-        default_category_ids: templateCategoryIds(template),
-        sort_order: template.sort_order || 0,
-      })
-      await load()
+      const saved = await api.patch(`/api/wallet/allocation-templates/${template.id}`, allocationTemplatePatchPayload(template))
+      mergeSavedAllocationTemplates([saved])
+      if (isReports) await loadReports()
       return true
     } catch (err) {
+      setError(err.message)
+      return false
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const saveAllocationTemplates = async (templates) => {
+    const dirtyTemplates = (templates || []).filter(allocationTemplateHasDraft)
+    if (dirtyTemplates.length === 0) return true
+    const errors = dirtyTemplates.map(template => ({
+      name: validateName(template.name, 'Allocation template name'),
+      amount: validateAmount(template.amount_input ?? moneyInputValue(template.default_amount_cents), 'Default amount', { nonNegative: true }),
+    }))
+    if (errors.some(hasErrors)) return false
+    setSaving(true)
+    setError(null)
+    const savedTemplates = []
+    try {
+      for (const template of dirtyTemplates) {
+        const saved = await api.patch(`/api/wallet/allocation-templates/${template.id}`, allocationTemplatePatchPayload(template))
+        savedTemplates.push(saved)
+      }
+      mergeSavedAllocationTemplates(savedTemplates)
+      if (isReports) await loadReports()
+      return true
+    } catch (err) {
+      if (savedTemplates.length > 0) mergeSavedAllocationTemplates(savedTemplates)
       setError(err.message)
       return false
     } finally {
@@ -3557,6 +3823,7 @@ export default function WalletRoute() {
           updateSettingsList={updateSettingsList}
           submitAllocationTemplate={submitAllocationTemplate}
           saveAllocationTemplate={saveAllocationTemplate}
+          saveAllocationTemplates={saveAllocationTemplates}
           deleteAllocationTemplate={deleteAllocationTemplate}
           submitIncomeTemplate={submitIncomeTemplate}
           saveIncomeTemplate={saveIncomeTemplate}
@@ -3884,6 +4151,7 @@ export default function WalletRoute() {
                   <option value="fixed">Fixed</option>
                   <option value="sinking_fund">Sinking Fund</option>
                   <option value="one_off">One-Off</option>
+                  <option value="subscription">Subscription</option>
                 </select>
                 <button type="submit" className="btn-ghost" disabled={saving || monthClosed || hasErrors(allocationErrors)}>
                   <Plus size={13} />
@@ -4176,6 +4444,13 @@ export default function WalletRoute() {
             setBookDeleteConfirm('')
           }}
           onConfirm={confirmDeleteBookMonth}
+        />
+      )}
+      {settingsLeaveConfirm && (
+        <UnsavedSettingsDraftModal
+          draftCount={allocationTemplateDraftCount}
+          onCancel={cancelSettingsLeave}
+          onDiscard={confirmSettingsLeave}
         />
       )}
     </div>

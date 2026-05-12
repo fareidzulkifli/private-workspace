@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS wallet_allocation_templates (
   name TEXT NOT NULL,
   default_amount_cents INTEGER NOT NULL DEFAULT 0,
   type TEXT NOT NULL DEFAULT 'flexible'
-    CHECK (type IN ('fixed', 'flexible', 'sinking_fund', 'one_off')),
+    CHECK (type IN ('fixed', 'flexible', 'sinking_fund', 'one_off', 'subscription')),
   carry_forward INTEGER NOT NULL DEFAULT 0 CHECK (carry_forward IN (0, 1)),
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
   sort_order INTEGER NOT NULL DEFAULT 0,
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS wallet_allocations (
   name TEXT NOT NULL,
   budgeted_cents INTEGER NOT NULL DEFAULT 0 CHECK (budgeted_cents >= 0),
   type TEXT NOT NULL DEFAULT 'flexible'
-    CHECK (type IN ('fixed', 'flexible', 'sinking_fund', 'one_off')),
+    CHECK (type IN ('fixed', 'flexible', 'sinking_fund', 'one_off', 'subscription')),
   carry_forward INTEGER NOT NULL DEFAULT 0 CHECK (carry_forward IN (0, 1)),
   sort_order INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
