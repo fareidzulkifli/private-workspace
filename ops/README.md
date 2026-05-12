@@ -16,6 +16,11 @@ The current release model copies the Go binaries, `migrations/`, and `web/dist/`
 into `/opt/private-workspace/releases/<release-id>/`, then updates
 `/opt/private-workspace/current`.
 
-Install an Nginx template into `/etc/nginx/sites-available/`, enable it from
-`/etc/nginx/sites-enabled/`, then run Certbot for the matching domain after DNS
-points to the VPS.
+The Nginx templates assume the matching Certbot certificate files already exist.
+For a first-time host, bring DNS up, obtain the certificate with a temporary
+HTTP-only Nginx block or `certbot certonly`, then install the template into
+`/etc/nginx/sites-available/` and enable it from `/etc/nginx/sites-enabled/`.
+
+Keep the Go service bound to `127.0.0.1` through `HTTP_ADDR`. Nginx should be
+the only public HTTP/HTTPS entry point, and the templates overwrite forwarded IP
+headers with `$remote_addr` before proxying to Go.

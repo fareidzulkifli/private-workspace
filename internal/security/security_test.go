@@ -2,6 +2,9 @@ package security
 
 import (
 	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -47,5 +50,51 @@ func TestLoginLimiterAllowBlockAndReset(t *testing.T) {
 	now = now.Add(16 * time.Minute)
 	if !limiter.Allow("127.0.0.1", "admin@example.com") {
 		t.Fatal("expired window should allow login")
+	}
+}
+
+func TestRequestLimiterBlocksOnAnyKeyAndResetsAfterWindow(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	limiter := NewRequestLimiter(2, time.Minute)
+	limiter.now = func() time.Time { return now }
+
+	if !limiter.Allow("ip:127.0.0.1", "ip-token:127.0.0.1:a") {
+		t.Fatal("first request should be allowed")
+	}
+	if !limiter.Allow("ip:127.0.0.1", "ip-token:127.0.0.1:a") {
+		t.Fatal("second request should be allowed")
+	}
+	if limiter.Allow("ip:127.0.0.1", "ip-token:127.0.0.1:b") {
+		t.Fatal("shared IP key should block even when token key changes")
+	}
+
+	now = now.Add(time.Minute + time.Second)
+	if !limiter.Allow("ip:127.0.0.1", "ip-token:127.0.0.1:b") {
+		t.Fatal("expired window should allow requests")
+	}
+}
+
+func TestHeadersSetsBrowserSecurityHeaders(t *testing.T) {
+	handler := Headers(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/login", nil))
+
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q", got)
+	}
+	if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("X-Frame-Options = %q", got)
+	}
+	if got := rec.Header().Get("Permissions-Policy"); got != "camera=(), microphone=(), geolocation=()" {
+		t.Fatalf("Permissions-Policy = %q", got)
+	}
+	csp := rec.Header().Get("Content-Security-Policy")
+	for _, directive := range []string{"default-src 'self'", "script-src 'self'", "object-src 'none'", "frame-ancestors 'none'", "form-action 'self'"} {
+		if !strings.Contains(csp, directive) {
+			t.Fatalf("Content-Security-Policy missing %q in %q", directive, csp)
+		}
 	}
 }

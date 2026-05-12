@@ -42,9 +42,13 @@ func RequestIDMiddleware(next http.Handler) http.Handler {
 
 func RealIP(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if ip := firstForwardedIP(r.Header.Get("X-Forwarded-For")); ip != "" {
+		if !trustedProxyPeer(r.RemoteAddr) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if ip := headerIP(r.Header.Get("X-Real-IP")); ip != "" {
 			r.RemoteAddr = ip
-		} else if ip := strings.TrimSpace(r.Header.Get("X-Real-IP")); ip != "" {
+		} else if ip := firstForwardedIP(r.Header.Get("X-Forwarded-For")); ip != "" {
 			r.RemoteAddr = ip
 		}
 		next.ServeHTTP(w, r)
@@ -168,7 +172,27 @@ func firstForwardedIP(value string) string {
 		return ""
 	}
 	parts := strings.Split(value, ",")
-	return strings.TrimSpace(parts[0])
+	return headerIP(parts[0])
+}
+
+func headerIP(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		return value
+	}
+	return ""
+}
+
+func trustedProxyPeer(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.IsLoopback()
 }
 
 func shouldLimitBody(r *http.Request) bool {

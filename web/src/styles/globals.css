@@ -6094,6 +6094,31 @@ select.is-invalid {
   opacity: 0.7;
 }
 
+.gn-share-warning-modal {
+  max-width: 420px;
+  border-radius: 8px;
+}
+.gn-share-warning-modal .modal-header {
+  padding: 18px 22px;
+}
+.gn-share-warning-modal h2 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.3;
+  color: var(--text);
+}
+.gn-share-warning-modal .modal-body {
+  padding: 20px 22px;
+}
+.gn-share-warning-modal p {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+.gn-share-warning-actions {
+  padding: 16px 22px;
+}
+
 /* share page — topbar */
 .gitnote-topbar {
   display: flex;

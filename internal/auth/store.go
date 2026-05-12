@@ -19,6 +19,8 @@ var ErrNotFound = errors.New("not found")
 
 const dbTimeFormat = "2006-01-02T15:04:05.000000000Z07:00"
 
+var dummyPasswordHash = "argon2id$v=19$m=65536,t=3,p=1$XzaeJEmk9z5UU9FlhM1GUQ$WCt+yJPQ4DcvPCALy76Yxw1wDrbFC2CSOdB+g3GTGag"
+
 type User struct {
 	ID    string `json:"id"`
 	Email string `json:"email"`
@@ -98,6 +100,9 @@ func (s *Store) VerifyAdminPassword(ctx context.Context, email string, password 
 	var passwordHash string
 	err := s.db.QueryRowContext(ctx, "SELECT id, email, password_hash FROM admin_users WHERE email = ?", email).Scan(&user.ID, &user.Email, &passwordHash)
 	if errors.Is(err, sql.ErrNoRows) {
+		if _, verifyErr := VerifyPassword(password, dummyPasswordHash); verifyErr != nil {
+			return User{}, false, fmt.Errorf("verify dummy admin password: %w", verifyErr)
+		}
 		return User{}, false, ErrNotFound
 	}
 	if err != nil {

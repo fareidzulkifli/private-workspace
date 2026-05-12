@@ -56,3 +56,82 @@ func TestRequestIDMiddlewareSetsHeader(t *testing.T) {
 		t.Fatal("missing X-Request-ID header")
 	}
 }
+
+func TestRealIPIgnoresForwardedHeadersFromUntrustedPeer(t *testing.T) {
+	handler := RealIP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := ClientIP(r); got != "192.0.2.10" {
+			t.Fatalf("ClientIP = %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.0.2.10:54321"
+	req.Header.Set("X-Real-IP", "198.51.100.10")
+	req.Header.Set("X-Forwarded-For", "203.0.113.20")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+func TestRealIPUsesTrustedProxyHeaders(t *testing.T) {
+	handler := RealIP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := ClientIP(r); got != "198.51.100.10" {
+			t.Fatalf("ClientIP = %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-Real-IP", "198.51.100.10")
+	req.Header.Set("X-Forwarded-For", "203.0.113.20")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+func TestRealIPFallsBackToForwardedForFromTrustedProxy(t *testing.T) {
+	handler := RealIP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := ClientIP(r); got != "203.0.113.20" {
+			t.Fatalf("ClientIP = %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "[::1]:54321"
+	req.Header.Set("X-Forwarded-For", "203.0.113.20, 198.51.100.10")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+func TestRealIPIgnoresMalformedForwardedHeaders(t *testing.T) {
+	handler := RealIP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := ClientIP(r); got != "127.0.0.1" {
+			t.Fatalf("ClientIP = %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-Real-IP", "not an ip")
+	req.Header.Set("X-Forwarded-For", "also not an ip")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", rec.Code)
+	}
+}

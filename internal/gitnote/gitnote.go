@@ -28,6 +28,11 @@ type RawFile struct {
 	Body        []byte
 }
 
+const (
+	MaxRawFileBytes = 10 << 20
+	rawCSP          = "sandbox; default-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
+)
+
 type Client interface {
 	Tree(ctx context.Context) ([]TreeItem, error)
 	Raw(ctx context.Context, filePath string) (RawFile, error)
@@ -140,9 +145,15 @@ func (c *GitHubClient) Raw(ctx context.Context, filePath string) (RawFile, error
 		_, _ = io.Copy(io.Discard, res.Body)
 		return RawFile{}, HTTPError{Status: res.StatusCode, Message: fmt.Sprintf("File not found (%d)", res.StatusCode)}
 	}
-	body, err := io.ReadAll(res.Body)
+	if res.ContentLength > MaxRawFileBytes {
+		return RawFile{}, HTTPError{Status: http.StatusRequestEntityTooLarge, Message: "File too large"}
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, MaxRawFileBytes+1))
 	if err != nil {
 		return RawFile{}, fmt.Errorf("read GitHub raw body: %w", err)
+	}
+	if int64(len(body)) > MaxRawFileBytes {
+		return RawFile{}, HTTPError{Status: http.StatusRequestEntityTooLarge, Message: "File too large"}
 	}
 	return RawFile{ContentType: ContentType(normalized), Body: body}, nil
 }
@@ -192,23 +203,49 @@ func (h *Handler) Raw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filePath := r.URL.Query().Get("path")
-	if _, err := NormalizePath(filePath); err != nil {
+	normalized, err := NormalizePath(filePath)
+	if err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "Invalid path")
 		return
 	}
-	file, err := h.client.Raw(r.Context(), filePath)
+	SetRawSecurityHeaders(w)
+	file, err := h.client.Raw(r.Context(), normalized)
 	if err != nil {
 		writeGitNoteError(w, err)
 		return
 	}
-	WriteRaw(w, file)
+	WriteRaw(w, normalized, file)
 }
 
-func WriteRaw(w http.ResponseWriter, file RawFile) {
-	w.Header().Set("Content-Type", file.ContentType)
+func WriteRaw(w http.ResponseWriter, filePath string, file RawFile) {
+	normalized, err := NormalizePath(filePath)
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "Invalid path")
+		return
+	}
+	SetRawSecurityHeaders(w)
+	if int64(len(file.Body)) > MaxRawFileBytes {
+		httputil.WriteError(w, http.StatusRequestEntityTooLarge, "File too large")
+		return
+	}
+	contentType := file.ContentType
+	if strings.TrimSpace(contentType) == "" {
+		contentType = ContentType(normalized)
+	}
+	if IsActiveBrowserFormat(normalized) {
+		contentType = "text/plain; charset=utf-8"
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{
+			"filename": safeAttachmentFilename(normalized),
+		}))
+	}
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "s-maxage=300, stale-while-revalidate=60")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(file.Body)
+}
+
+func SetRawSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy", rawCSP)
 }
 
 func NormalizePath(value string) (string, error) {
@@ -306,6 +343,15 @@ func ContentType(filePath string) string {
 	}
 }
 
+func IsActiveBrowserFormat(filePath string) bool {
+	switch strings.ToLower(strings.TrimPrefix(path.Ext(filePath), ".")) {
+	case "html", "htm", "xhtml", "svg", "xml":
+		return true
+	default:
+		return false
+	}
+}
+
 func writeGitNoteError(w http.ResponseWriter, err error) {
 	var httpErr HTTPError
 	if errors.As(err, &httpErr) {
@@ -317,6 +363,21 @@ func writeGitNoteError(w http.ResponseWriter, err error) {
 		return
 	}
 	httputil.WriteError(w, http.StatusInternalServerError, err.Error())
+}
+
+func safeAttachmentFilename(filePath string) string {
+	name := path.Base(filePath)
+	name = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == '/' || r == '\\' {
+			return -1
+		}
+		return r
+	}, name)
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." {
+		return "download"
+	}
+	return name
 }
 
 func escapePath(value string) string {

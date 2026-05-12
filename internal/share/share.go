@@ -17,12 +17,15 @@ import (
 	"private-workspace/internal/db"
 	"private-workspace/internal/gitnote"
 	"private-workspace/internal/httputil"
+	"private-workspace/internal/security"
 	"private-workspace/internal/shared"
 )
 
 const (
 	shareTokenRandomBytes = 12
 	shareSlugMaxLength    = 48
+	publicShareRateLimit  = 120
+	publicShareRateWindow = time.Minute
 )
 
 type GitNoteShare struct {
@@ -249,12 +252,25 @@ func (r *Repository) getGitNoteShareByID(ctx context.Context, id string) (GitNot
 }
 
 type Handler struct {
-	repo   *Repository
-	client gitnote.Client
+	repo          *Repository
+	client        gitnote.Client
+	publicLimiter *security.RequestLimiter
+}
+
+type HandlerOptions struct {
+	PublicLimiter *security.RequestLimiter
 }
 
 func NewHandler(database *db.DB, client gitnote.Client) *Handler {
-	return &Handler{repo: NewRepository(database), client: client}
+	return NewHandlerWithOptions(database, client, HandlerOptions{})
+}
+
+func NewHandlerWithOptions(database *db.DB, client gitnote.Client, opts HandlerOptions) *Handler {
+	limiter := opts.PublicLimiter
+	if limiter == nil {
+		limiter = security.NewRequestLimiter(publicShareRateLimit, publicShareRateWindow)
+	}
+	return &Handler{repo: NewRepository(database), client: client, publicLimiter: limiter}
 }
 
 func (h *Handler) RegisterRoutes(r chi.Router) {
@@ -313,7 +329,11 @@ func (h *Handler) RevokeGitNoteShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetPublicShare(w http.ResponseWriter, r *http.Request) {
-	share, err := h.repo.ActiveByToken(r.Context(), chi.URLParam(r, "token"))
+	token := chi.URLParam(r, "token")
+	if !h.allowPublicShareRequest(w, r, token) {
+		return
+	}
+	share, err := h.repo.ActiveByToken(r.Context(), token)
 	if err != nil {
 		writePublicShareError(w, r, err)
 		return
@@ -322,7 +342,11 @@ func (h *Handler) GetPublicShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) PublicTree(w http.ResponseWriter, r *http.Request) {
-	share, err := h.repo.ActiveByToken(r.Context(), chi.URLParam(r, "token"))
+	token := chi.URLParam(r, "token")
+	if !h.allowPublicShareRequest(w, r, token) {
+		return
+	}
+	share, err := h.repo.ActiveByToken(r.Context(), token)
 	if err != nil {
 		writePublicShareError(w, r, err)
 		return
@@ -340,7 +364,11 @@ func (h *Handler) PublicTree(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) PublicRaw(w http.ResponseWriter, r *http.Request) {
-	share, err := h.repo.ActiveByToken(r.Context(), chi.URLParam(r, "token"))
+	token := chi.URLParam(r, "token")
+	if !h.allowPublicShareRequest(w, r, token) {
+		return
+	}
+	share, err := h.repo.ActiveByToken(r.Context(), token)
 	if err != nil {
 		writePublicShareError(w, r, err)
 		return
@@ -350,16 +378,17 @@ func (h *Handler) PublicRaw(w http.ResponseWriter, r *http.Request) {
 		httputil.NotFound(w, r)
 		return
 	}
+	gitnote.SetRawSecurityHeaders(w)
 	if h.client == nil {
 		httputil.WriteError(w, http.StatusInternalServerError, "GITHUB_PAT not configured")
 		return
 	}
 	file, err := h.client.Raw(r.Context(), filePath)
 	if err != nil {
-		httputil.NotFound(w, r)
+		writePublicRawError(w, r, err)
 		return
 	}
-	gitnote.WriteRaw(w, file)
+	gitnote.WriteRaw(w, filePath, file)
 }
 
 type createRequest struct {
@@ -499,10 +528,31 @@ func writeShareError(w http.ResponseWriter, r *http.Request, err error) {
 	httputil.WriteError(w, http.StatusBadRequest, err.Error())
 }
 
+func (h *Handler) allowPublicShareRequest(w http.ResponseWriter, r *http.Request, token string) bool {
+	if h.publicLimiter == nil {
+		return true
+	}
+	ip := httputil.ClientIP(r)
+	if h.publicLimiter.Allow("share:ip:"+ip, "share:ip-token:"+ip+":"+shared.TokenHash(token)) {
+		return true
+	}
+	httputil.WriteError(w, http.StatusTooManyRequests, "Too many requests. Try again later.")
+	return false
+}
+
 func writePublicShareError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, shared.ErrNotFound) {
 		httputil.NotFound(w, r)
 		return
 	}
 	httputil.WriteError(w, http.StatusInternalServerError, err.Error())
+}
+
+func writePublicRawError(w http.ResponseWriter, r *http.Request, err error) {
+	var httpErr gitnote.HTTPError
+	if errors.As(err, &httpErr) && httpErr.Status == http.StatusRequestEntityTooLarge {
+		httputil.WriteError(w, http.StatusRequestEntityTooLarge, "File too large")
+		return
+	}
+	httputil.NotFound(w, r)
 }

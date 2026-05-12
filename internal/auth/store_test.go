@@ -2,10 +2,12 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,6 +82,29 @@ func TestBootstrapAdminUpdatesHash(t *testing.T) {
 	}
 	if stored != secondHash {
 		t.Fatal("admin password hash was not updated")
+	}
+}
+
+func TestVerifyAdminPasswordMissingEmailUsesDummyHash(t *testing.T) {
+	ctx := context.Background()
+	store, database := newTestStore(t, time.Hour)
+	defer database.Close()
+
+	_, ok, err := store.VerifyAdminPassword(ctx, "missing@example.com", "wrong")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v", err)
+	}
+	if ok {
+		t.Fatal("missing user password should not verify")
+	}
+
+	original := dummyPasswordHash
+	dummyPasswordHash = "malformed"
+	defer func() { dummyPasswordHash = original }()
+
+	_, _, err = store.VerifyAdminPassword(ctx, "missing@example.com", "wrong")
+	if err == nil || !strings.Contains(err.Error(), "verify dummy admin password") {
+		t.Fatalf("expected dummy verification error, got %v", err)
 	}
 }
 

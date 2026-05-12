@@ -25,7 +25,29 @@ import { apiFetch } from '../lib/api'
 const TEXT_EXTENSIONS  = new Set(['md', 'txt', 'js', 'ts', 'jsx', 'tsx', 'py', 'json', 'yaml', 'yml', 'toml', 'sh', 'css', 'html', 'xml', 'csv', 'sql'])
 const DOCX_EXTENSIONS  = new Set(['doc', 'docx'])
 const EXCEL_EXTENSIONS = new Set(['xls', 'xlsx', 'xlxs'])
-const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico'])
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'ico'])
+
+const GENERATED_PREVIEW_SANITIZE_CONFIG = {
+  FORBID_TAGS: [
+    'script',
+    'iframe',
+    'object',
+    'embed',
+    'form',
+    'input',
+    'button',
+    'textarea',
+    'select',
+    'option',
+    'link',
+    'meta',
+    'base',
+    'svg',
+    'math',
+    'style',
+  ],
+  FORBID_ATTR: ['style', 'srcset'],
+}
 
 const highlightLanguages = {
   bash,
@@ -87,6 +109,11 @@ function rewriteImageSrcs(html, filePath, rawBase) {
     const resolved = resolvePath(dir, src)
     return `<img${before} src="${rawBase}?path=${encodeURIComponent(resolved)}"${after}>`
   })
+}
+
+function sanitizeGeneratedPreviewHtml(html) {
+  if (typeof window === 'undefined') return ''
+  return DOMPurify.sanitize(String(html || ''), GENERATED_PREVIEW_SANITIZE_CONFIG)
 }
 
 function Breadcrumb({ path }) {
@@ -158,12 +185,19 @@ export default function GitNoteViewer({ filePath, onToggleExplorer, explorerVisi
   const [loading, setLoading]           = useState(false)
   const [error, setError]               = useState(null)
   const [shareStatus, setShareStatus]   = useState('idle')
+  const [shareConfirmOpen, setShareConfirmOpen] = useState(false)
   const [markdownHtml, setMarkdownHtml] = useState('')
   const markdownRef                     = useRef(null)
 
-  const handleShare = async () => {
+  const handleShare = () => {
+    if (!filePath || shareStatus === 'sharing') return
+    setShareConfirmOpen(true)
+  }
+
+  const createShare = async () => {
     if (!filePath || shareStatus === 'sharing') return
 
+    setShareConfirmOpen(false)
     setShareStatus('sharing')
     try {
       const res = await apiFetch('/api/shares/gitnote', {
@@ -190,6 +224,11 @@ export default function GitNoteViewer({ filePath, onToggleExplorer, explorerVisi
     }
   }
 
+  const cancelShare = () => {
+    if (shareStatus === 'sharing') return
+    setShareConfirmOpen(false)
+  }
+
   const filename = filePath?.split('/').pop() || ''
   const ext      = filename.includes('.') ? filename.split('.').pop().toLowerCase() : 'txt'
   const isPdf    = ext === 'pdf'
@@ -206,10 +245,8 @@ export default function GitNoteViewer({ filePath, onToggleExplorer, explorerVisi
     }
     const raw = stripFrontMatter(content)
     const html = marked.parse(raw)
-    const clean = typeof window !== 'undefined'
-      ? DOMPurify.sanitize(html)
-      : html
-    setMarkdownHtml(rewriteImageSrcs(clean, filePath, rawBase))
+    const htmlWithImageUrls = rewriteImageSrcs(html, filePath, rawBase)
+    setMarkdownHtml(sanitizeGeneratedPreviewHtml(htmlWithImageUrls))
   }, [content, ext, filePath, rawBase])
 
   useEffect(() => {
@@ -315,14 +352,14 @@ export default function GitNoteViewer({ filePath, onToggleExplorer, explorerVisi
           if (isDocx) {
             const mammoth = await loadMammoth()
             const result = await mammoth.convertToHtml({ arrayBuffer: buffer })
-            setRendered({ type: 'docx', html: result.value })
+            setRendered({ type: 'docx', html: sanitizeGeneratedPreviewHtml(result.value) })
           } else {
             const mod = await import('xlsx')
             const XLSX = mod.default || mod
             const wb = XLSX.read(new Uint8Array(buffer), { type: 'array' })
             const sheets = wb.SheetNames.map(name => ({
               name,
-              html: XLSX.utils.sheet_to_html(wb.Sheets[name]),
+              html: sanitizeGeneratedPreviewHtml(XLSX.utils.sheet_to_html(wb.Sheets[name])),
             }))
             setRendered({ type: 'excel', sheets })
           }
@@ -479,6 +516,28 @@ export default function GitNoteViewer({ filePath, onToggleExplorer, explorerVisi
         )}
 
       </div>
+
+      {shareConfirmOpen && (
+        <div
+          className="modal-overlay gn-share-warning-overlay"
+          onClick={event => {
+            if (event.target.classList.contains('modal-overlay')) cancelShare()
+          }}
+        >
+          <div className="modal-content gn-share-warning-modal" role="dialog" aria-modal="true" aria-labelledby="gn-share-warning-title">
+            <div className="modal-header">
+              <h2 id="gn-share-warning-title">Create public link?</h2>
+            </div>
+            <div className="modal-body">
+              <p>Anyone with this link can view this shared path. Treat the link like a password.</p>
+            </div>
+            <div className="modal-footer gn-share-warning-actions">
+              <button type="button" className="btn-ghost" onClick={cancelShare}>Cancel</button>
+              <button type="button" className="btn-primary" onClick={createShare}>Create link</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
