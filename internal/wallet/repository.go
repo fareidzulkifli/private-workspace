@@ -112,28 +112,24 @@ func (r *Repository) CreateMonth(ctx context.Context, req CreateMonthRequest) (M
 		CreatedAt:           now,
 		UpdatedAt:           now,
 	}
-	if len(req.IncomeItems) > 0 || len(req.Allocations) > 0 {
-		err = r.createMonthFromReviewedRows(ctx, month, req)
-	} else if req.UseTemplates {
-		err = r.db.Tx(ctx, func(tx *sql.Tx) error {
-			if err := insertMonth(ctx, tx, month); err != nil {
-				return err
-			}
-			if err := r.populateMonthFromTemplates(ctx, tx, month, req.CarryForward); err != nil {
-				return err
-			}
-			return nil
-		})
-	} else {
-		err = insertMonth(ctx, r.db, month)
-	}
-	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			return Month{}, errors.New("wallet month already exists")
-		}
+	if err := r.ensureMonthDoesNotExist(ctx, month.Month); err != nil {
 		return Month{}, err
 	}
-	return month, nil
+	incomeItems, allocations, err := r.preparedMonthRows(ctx, r.db, month, req)
+	if err != nil {
+		return Month{}, err
+	}
+	applyInitialWalletBalance(&month, req, incomeItems)
+	err = r.db.Tx(ctx, func(tx *sql.Tx) error {
+		if err := insertMonth(ctx, tx, month); err != nil {
+			return err
+		}
+		return insertPreparedMonthRows(ctx, tx, incomeItems, allocations)
+	})
+	if err != nil {
+		return Month{}, err
+	}
+	return r.GetMonth(ctx, month.Month)
 }
 
 func (r *Repository) GetMonth(ctx context.Context, monthKey string) (Month, error) {
@@ -261,12 +257,17 @@ func (r *Repository) CreateIncome(ctx context.Context, monthKey string, req Crea
 	}
 	now := shared.Now()
 	id := shared.NewID()
-	_, err = r.db.ExecContext(ctx, `INSERT INTO wallet_income_items
-		(id, month_id, name, amount_cents, received_date, applies_to_month, notes, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, month.ID, name, req.AmountCents, shared.NullString(receivedDate), appliesToMonth, normalizeOptionalString(req.Notes), now, now)
+	err = r.db.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_income_items
+			(id, month_id, name, amount_cents, received_date, applies_to_month, notes, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, month.ID, name, req.AmountCents, shared.NullString(receivedDate), appliesToMonth, normalizeOptionalString(req.Notes), now, now); err != nil {
+			return fmt.Errorf("create wallet income: %w", err)
+		}
+		return applyWalletBalanceDelta(ctx, tx, month.ID, req.AmountCents, now)
+	})
 	if err != nil {
-		return IncomeItem{}, fmt.Errorf("create wallet income: %w", err)
+		return IncomeItem{}, err
 	}
 	return r.GetIncome(ctx, id)
 }
@@ -293,6 +294,7 @@ func (r *Repository) UpdateIncome(ctx context.Context, id string, patch map[stri
 	if err := r.ensureMonthOpen(ctx, current.MonthID); err != nil {
 		return IncomeItem{}, err
 	}
+	previousAmount := current.AmountCents
 	if raw, ok := patch["name"]; ok {
 		current.Name, err = shared.ParseRequiredString(raw)
 		if err != nil || current.Name == "" {
@@ -338,16 +340,22 @@ func (r *Repository) UpdateIncome(ctx context.Context, id string, patch map[stri
 		}
 	}
 	current.UpdatedAt = shared.Now()
-	result, err := r.db.ExecContext(ctx, `UPDATE wallet_income_items
-		SET name = ?, amount_cents = ?, received_date = ?, applies_to_month = ?, notes = ?, updated_at = ?
-		WHERE id = ?`,
-		current.Name, current.AmountCents, shared.NullString(current.ReceivedDate), current.AppliesToMonth,
-		shared.NullString(current.Notes), current.UpdatedAt, id)
+	err = r.db.Tx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE wallet_income_items
+			SET name = ?, amount_cents = ?, received_date = ?, applies_to_month = ?, notes = ?, updated_at = ?
+			WHERE id = ?`,
+			current.Name, current.AmountCents, shared.NullString(current.ReceivedDate), current.AppliesToMonth,
+			shared.NullString(current.Notes), current.UpdatedAt, id)
+		if err != nil {
+			return fmt.Errorf("update wallet income: %w", err)
+		}
+		if ok, err := shared.QuerySingleResult(result); err == nil && !ok {
+			return shared.ErrNotFound
+		}
+		return applyWalletBalanceDelta(ctx, tx, current.MonthID, current.AmountCents-previousAmount, current.UpdatedAt)
+	})
 	if err != nil {
-		return IncomeItem{}, fmt.Errorf("update wallet income: %w", err)
-	}
-	if ok, err := shared.QuerySingleResult(result); err == nil && !ok {
-		return IncomeItem{}, shared.ErrNotFound
+		return IncomeItem{}, err
 	}
 	return r.GetIncome(ctx, id)
 }
@@ -360,7 +368,17 @@ func (r *Repository) DeleteIncome(ctx context.Context, id string) error {
 	if err := r.ensureMonthOpen(ctx, item.MonthID); err != nil {
 		return err
 	}
-	return deleteByID(ctx, r.db, "wallet_income_items", id)
+	now := shared.Now()
+	return r.db.Tx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `DELETE FROM wallet_income_items WHERE id = ?`, id)
+		if err != nil {
+			return fmt.Errorf("delete wallet income: %w", err)
+		}
+		if ok, err := shared.QuerySingleResult(result); err == nil && !ok {
+			return shared.ErrNotFound
+		}
+		return applyWalletBalanceDelta(ctx, tx, item.MonthID, -item.AmountCents, now)
+	})
 }
 
 func (r *Repository) CreateAllocation(ctx context.Context, monthKey string, req CreateAllocationRequest) (Allocation, error) {
@@ -534,13 +552,18 @@ func (r *Repository) CreateTransaction(ctx context.Context, monthKey string, req
 	}
 	now := shared.Now()
 	id := shared.NewID()
-	_, err = r.db.ExecContext(ctx, `INSERT INTO wallet_transactions
-		(id, month_id, allocation_id, category_id, date, amount_cents, note, rounded, kind, source, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'spend', 'manual', ?, ?)`,
-		id, month.ID, strings.TrimSpace(req.AllocationID), categoryID, date, req.AmountCents,
-		normalizeOptionalString(req.Note), boolInt(req.Rounded), now, now)
+	err = r.db.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_transactions
+			(id, month_id, allocation_id, category_id, date, amount_cents, note, rounded, kind, source, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'spend', 'manual', ?, ?)`,
+			id, month.ID, strings.TrimSpace(req.AllocationID), categoryID, date, req.AmountCents,
+			normalizeOptionalString(req.Note), boolInt(req.Rounded), now, now); err != nil {
+			return fmt.Errorf("create wallet transaction: %w", err)
+		}
+		return applyWalletBalanceDelta(ctx, tx, month.ID, -req.AmountCents, now)
+	})
 	if err != nil {
-		return Transaction{}, fmt.Errorf("create wallet transaction: %w", err)
+		return Transaction{}, err
 	}
 	return r.GetTransaction(ctx, id)
 }
@@ -564,6 +587,15 @@ func (r *Repository) UpdateTransaction(ctx context.Context, id string, patch map
 	}
 	if err := r.ensureMonthOpen(ctx, current.MonthID); err != nil {
 		return Transaction{}, err
+	}
+	previousAmount := current.AmountCents
+	balanceRelevant := current.Kind == "spend" && current.ParentTransactionID == nil
+	if balanceRelevant {
+		hasChildren, err := r.transactionHasSplitChildren(ctx, current.ID)
+		if err != nil {
+			return Transaction{}, err
+		}
+		balanceRelevant = !hasChildren
 	}
 	if current.ParentTransactionID != nil {
 		if _, amountPatch := patch["amount_cents"]; amountPatch {
@@ -620,16 +652,25 @@ func (r *Repository) UpdateTransaction(ctx context.Context, id string, patch map
 		}
 	}
 	current.UpdatedAt = shared.Now()
-	result, err := r.db.ExecContext(ctx, `UPDATE wallet_transactions
-		SET allocation_id = ?, category_id = ?, date = ?, amount_cents = ?, note = ?, rounded = ?, updated_at = ?
-		WHERE id = ?`,
-		current.AllocationID, current.CategoryID, current.Date, current.AmountCents, shared.NullString(current.Note),
-		boolInt(current.Rounded), current.UpdatedAt, id)
+	err = r.db.Tx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE wallet_transactions
+			SET allocation_id = ?, category_id = ?, date = ?, amount_cents = ?, note = ?, rounded = ?, updated_at = ?
+			WHERE id = ?`,
+			current.AllocationID, current.CategoryID, current.Date, current.AmountCents, shared.NullString(current.Note),
+			boolInt(current.Rounded), current.UpdatedAt, id)
+		if err != nil {
+			return fmt.Errorf("update wallet transaction: %w", err)
+		}
+		if ok, err := shared.QuerySingleResult(result); err == nil && !ok {
+			return shared.ErrNotFound
+		}
+		if !balanceRelevant {
+			return nil
+		}
+		return applyWalletBalanceDelta(ctx, tx, current.MonthID, previousAmount-current.AmountCents, current.UpdatedAt)
+	})
 	if err != nil {
-		return Transaction{}, fmt.Errorf("update wallet transaction: %w", err)
-	}
-	if ok, err := shared.QuerySingleResult(result); err == nil && !ok {
-		return Transaction{}, shared.ErrNotFound
+		return Transaction{}, err
 	}
 	return r.GetTransaction(ctx, id)
 }
@@ -645,24 +686,32 @@ func (r *Repository) DeleteTransaction(ctx context.Context, id string) error {
 	if current.ParentTransactionID != nil {
 		return errors.New("split detail cannot be deleted directly")
 	}
+	now := shared.Now()
 	return r.db.Tx(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT child_transaction_id
-			FROM wallet_transaction_splits
-			WHERE parent_transaction_id = ?`, id)
+		rows, err := tx.QueryContext(ctx, `SELECT s.child_transaction_id, t.amount_cents
+			FROM wallet_transaction_splits s
+			JOIN wallet_transactions t ON t.id = s.child_transaction_id
+			WHERE s.parent_transaction_id = ?`, id)
 		if err != nil {
 			return fmt.Errorf("list split children: %w", err)
 		}
 		defer rows.Close()
 		var childIDs []string
+		var removedSpend int64
 		for rows.Next() {
 			var childID string
-			if err := rows.Scan(&childID); err != nil {
+			var childAmount int64
+			if err := rows.Scan(&childID, &childAmount); err != nil {
 				return err
 			}
 			childIDs = append(childIDs, childID)
+			removedSpend += childAmount
 		}
 		if err := rows.Err(); err != nil {
 			return err
+		}
+		if len(childIDs) == 0 && current.Kind == "spend" {
+			removedSpend = current.AmountCents
 		}
 		for _, childID := range childIDs {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM wallet_transactions WHERE id = ?`, childID); err != nil {
@@ -676,7 +725,7 @@ func (r *Repository) DeleteTransaction(ctx context.Context, id string) error {
 		if ok, err := shared.QuerySingleResult(result); err == nil && !ok {
 			return shared.ErrNotFound
 		}
-		return nil
+		return applyWalletBalanceDelta(ctx, tx, current.MonthID, removedSpend, now)
 	})
 }
 
@@ -731,6 +780,22 @@ func (r *Repository) ensureMonthOpen(ctx context.Context, monthID string) error 
 	}
 	if status == "closed" {
 		return errors.New("wallet month is closed")
+	}
+	return nil
+}
+
+func applyWalletBalanceDelta(ctx context.Context, q shared.SQLer, monthID string, delta int64, now string) error {
+	if delta == 0 {
+		return nil
+	}
+	result, err := q.ExecContext(ctx, `UPDATE wallet_months
+		SET wallet_balance_cents = wallet_balance_cents + ?, updated_at = ?
+		WHERE id = ?`, delta, now, monthID)
+	if err != nil {
+		return fmt.Errorf("update wallet balance: %w", err)
+	}
+	if ok, err := shared.QuerySingleResult(result); err == nil && !ok {
+		return shared.ErrNotFound
 	}
 	return nil
 }

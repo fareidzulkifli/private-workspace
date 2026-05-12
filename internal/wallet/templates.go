@@ -525,56 +525,6 @@ func (r *Repository) DeleteCategory(ctx context.Context, id string) error {
 	return deleteByID(ctx, r.db, "wallet_categories", id)
 }
 
-func (r *Repository) populateMonthFromTemplates(ctx context.Context, tx *sql.Tx, month Month, carryForward bool) error {
-	templates, err := listActiveAllocationTemplates(ctx, tx)
-	if err != nil {
-		return err
-	}
-	previousMonthID, err := previousWalletMonthID(ctx, tx, month.Month)
-	if err != nil {
-		return err
-	}
-	for _, template := range templates {
-		amount := template.DefaultAmountCents
-		if carryForward && template.CarryForward && previousMonthID != nil {
-			remaining, err := previousAllocationRemaining(ctx, tx, *previousMonthID, template)
-			if err != nil {
-				return err
-			}
-			if remaining > 0 {
-				amount += remaining
-			}
-		}
-		allocationID := shared.NewID()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_allocations
-			(id, month_id, template_id, name, budgeted_cents, type, carry_forward, sort_order, active, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-			allocationID, month.ID, template.ID, template.Name, amount, template.Type,
-			boolInt(template.CarryForward), template.SortOrder, month.CreatedAt, month.UpdatedAt); err != nil {
-			return fmt.Errorf("create allocation from template: %w", err)
-		}
-		if err := insertAllocationDefaultCategories(ctx, tx, allocationID, categoryIDs(template.DefaultCategories), month.CreatedAt); err != nil {
-			return err
-		}
-	}
-
-	incomeTemplates, err := listActiveIncomeTemplates(ctx, tx)
-	if err != nil {
-		return err
-	}
-	for _, template := range incomeTemplates {
-		receivedDate := templateReceivedDate(month.Month, template.DefaultDay)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_income_items
-			(id, month_id, name, amount_cents, received_date, applies_to_month, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			shared.NewID(), month.ID, template.Name, template.DefaultAmountCents,
-			shared.NullString(receivedDate), month.Month, month.CreatedAt, month.UpdatedAt); err != nil {
-			return fmt.Errorf("create income from template: %w", err)
-		}
-	}
-	return nil
-}
-
 func listActiveAllocationTemplates(ctx context.Context, q shared.SQLer) ([]AllocationTemplate, error) {
 	rows, err := q.QueryContext(ctx, `SELECT id, name, default_amount_cents, type, carry_forward,
 			active, sort_order, created_at, updated_at

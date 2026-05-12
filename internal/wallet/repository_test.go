@@ -14,11 +14,9 @@ func TestWalletSummaryAndTransactionReviewFlow(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	walletBalance := int64(598000)
 	if _, err := repo.CreateMonth(ctx, CreateMonthRequest{
 		Month:               "2026-05",
 		OpeningBalanceCents: 100000,
-		WalletBalanceCents:  &walletBalance,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +100,83 @@ func TestWalletSummaryAndTransactionReviewFlow(t *testing.T) {
 	}
 	if summary.ReviewCounts.UnsortedCount != 0 || summary.ReviewCounts.RoundedCount != 1 {
 		t.Fatalf("review counts after reclassify = %#v", summary.ReviewCounts)
+	}
+}
+
+func TestWalletBalanceTracksIncomeAndTransactionDeltas(t *testing.T) {
+	repo, cleanup := newTestRepository(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := repo.CreateMonth(ctx, CreateMonthRequest{
+		Month:               "2026-05",
+		OpeningBalanceCents: 0,
+		IncomeItems: []MonthPreviewIncomeItemRequest{{
+			Name:           "Salary",
+			AmountCents:    500000,
+			AppliesToMonth: "2026-05",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	summary := mustSummary(t, repo, ctx, "2026-05")
+	if summary.WalletBalanceCents != 500000 || summary.ExpectedBalanceCents != 500000 || summary.VarianceCents != 0 {
+		t.Fatalf("initial summary = %#v", summary)
+	}
+
+	work, err := repo.CreateAllocation(ctx, "2026-05", CreateAllocationRequest{Name: "Work Expense", BudgetedCents: 50000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction, err := repo.CreateTransaction(ctx, "2026-05", CreateTransactionRequest{
+		AllocationID: work.ID,
+		AmountCents:  12500,
+		Date:         "2026-05-10",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary = mustSummary(t, repo, ctx, "2026-05")
+	if summary.WalletBalanceCents != 487500 || summary.ExpectedBalanceCents != 487500 || summary.VarianceCents != 0 {
+		t.Fatalf("summary after spend = %#v", summary)
+	}
+
+	if _, err := repo.UpdateMonth(ctx, "2026-05", rawPatch(map[string]any{"wallet_balance_cents": 480000})); err != nil {
+		t.Fatal(err)
+	}
+	bonus, err := repo.CreateIncome(ctx, "2026-05", CreateIncomeRequest{
+		Name:           "Bonus",
+		AmountCents:    20000,
+		AppliesToMonth: "2026-05",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary = mustSummary(t, repo, ctx, "2026-05")
+	if summary.WalletBalanceCents != 500000 || summary.ExpectedBalanceCents != 507500 || summary.VarianceCents != -7500 {
+		t.Fatalf("summary after manual baseline and bonus = %#v", summary)
+	}
+
+	if _, err := repo.UpdateIncome(ctx, bonus.ID, rawPatch(map[string]any{"amount_cents": 15000})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.UpdateTransaction(ctx, transaction.ID, rawPatch(map[string]any{"amount_cents": 10000})); err != nil {
+		t.Fatal(err)
+	}
+	summary = mustSummary(t, repo, ctx, "2026-05")
+	if summary.WalletBalanceCents != 497500 || summary.ExpectedBalanceCents != 505000 || summary.VarianceCents != -7500 {
+		t.Fatalf("summary after edits = %#v", summary)
+	}
+
+	if err := repo.DeleteTransaction(ctx, transaction.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.DeleteIncome(ctx, bonus.ID); err != nil {
+		t.Fatal(err)
+	}
+	summary = mustSummary(t, repo, ctx, "2026-05")
+	if summary.WalletBalanceCents != 492500 || summary.ExpectedBalanceCents != 500000 || summary.VarianceCents != -7500 {
+		t.Fatalf("summary after deletes = %#v", summary)
 	}
 }
 
@@ -381,7 +456,7 @@ func TestReconciliationBalanceUpdateCreatesAdjustment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.BalanceUpdate.PreviousBalanceCents != 100000 || result.BalanceUpdate.ExpectedBalanceCents != 599000 {
+	if result.BalanceUpdate.PreviousBalanceCents != 599000 || result.BalanceUpdate.ExpectedBalanceCents != 599000 {
 		t.Fatalf("balance update = %#v", result.BalanceUpdate)
 	}
 	if result.Adjustment == nil || result.Adjustment.AmountCents != 100 || result.Adjustment.Reason != "rounding" {
@@ -407,7 +482,6 @@ func TestMonthBookAndDeleteMonthCascade(t *testing.T) {
 	month, err := repo.CreateMonth(ctx, CreateMonthRequest{
 		Month:               "2026-05",
 		OpeningBalanceCents: 100000,
-		WalletBalanceCents:  int64Ptr(595000),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -498,7 +572,6 @@ func TestReviewReportsCloseAndSplitFlow(t *testing.T) {
 	if _, err := repo.CreateMonth(ctx, CreateMonthRequest{
 		Month:               "2026-05",
 		OpeningBalanceCents: 100000,
-		WalletBalanceCents:  int64Ptr(595000),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -606,7 +679,7 @@ func TestReviewReportsCloseAndSplitFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if closed.Status != "closed" || closed.ClosedWalletBalanceCents == nil || *closed.ClosedWalletBalanceCents != 595000 {
+	if closed.Status != "closed" || closed.ClosedWalletBalanceCents == nil || *closed.ClosedWalletBalanceCents != 600000 {
 		t.Fatalf("closed month = %#v", closed)
 	}
 	if _, err := repo.CreateTransaction(ctx, "2026-05", CreateTransactionRequest{AllocationID: work.ID, AmountCents: 100, Date: "2026-05-11"}); err == nil {

@@ -19,19 +19,11 @@ func (r *Repository) PreviewMonth(ctx context.Context, req CreateMonthRequest) (
 		return MonthPreview{}, err
 	}
 
-	var incomeItems []IncomeItem
-	var allocations []Allocation
-	if len(req.IncomeItems) > 0 || len(req.Allocations) > 0 {
-		incomeItems, allocations, err = r.reviewedPreviewRows(ctx, r.db, month, req)
-	} else if req.UseTemplates {
-		incomeItems, allocations, err = r.templatePreviewRows(ctx, r.db, month, req.CarryForward)
-	} else {
-		incomeItems = []IncomeItem{}
-		allocations = []Allocation{}
-	}
+	incomeItems, allocations, err := r.preparedMonthRows(ctx, r.db, month, req)
 	if err != nil {
 		return MonthPreview{}, err
 	}
+	applyInitialWalletBalance(&month, req, incomeItems)
 	categories, err := r.ListCategories(ctx)
 	if err != nil {
 		return MonthPreview{}, err
@@ -45,42 +37,52 @@ func (r *Repository) PreviewMonth(ctx context.Context, req CreateMonthRequest) (
 	}, nil
 }
 
-func (r *Repository) createMonthFromReviewedRows(ctx context.Context, month Month, req CreateMonthRequest) error {
-	if err := r.ensureMonthDoesNotExist(ctx, month.Month); err != nil {
-		return err
+func (r *Repository) preparedMonthRows(ctx context.Context, q shared.SQLer, month Month, req CreateMonthRequest) ([]IncomeItem, []Allocation, error) {
+	if len(req.IncomeItems) > 0 || len(req.Allocations) > 0 {
+		return r.reviewedPreviewRows(ctx, q, month, req)
 	}
-	return r.db.Tx(ctx, func(tx *sql.Tx) error {
-		if err := insertMonth(ctx, tx, month); err != nil {
+	if req.UseTemplates {
+		return r.templatePreviewRows(ctx, q, month, req.CarryForward)
+	}
+	return []IncomeItem{}, []Allocation{}, nil
+}
+
+func applyInitialWalletBalance(month *Month, req CreateMonthRequest, incomeItems []IncomeItem) {
+	if req.WalletBalanceCents != nil {
+		month.WalletBalanceCents = *req.WalletBalanceCents
+		return
+	}
+	incomeTotal := int64(0)
+	for _, item := range incomeItems {
+		incomeTotal += item.AmountCents
+	}
+	month.WalletBalanceCents = month.OpeningBalanceCents + incomeTotal
+}
+
+func insertPreparedMonthRows(ctx context.Context, tx *sql.Tx, incomeItems []IncomeItem, allocations []Allocation) error {
+	for _, item := range incomeItems {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_income_items
+			(id, month_id, name, amount_cents, received_date, applies_to_month, notes, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			item.ID, item.MonthID, item.Name, item.AmountCents, shared.NullString(item.ReceivedDate),
+			item.AppliesToMonth, shared.NullString(item.Notes), item.CreatedAt, item.UpdatedAt); err != nil {
+			return fmt.Errorf("create reviewed wallet income: %w", err)
+		}
+	}
+	for _, allocation := range allocations {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_allocations
+			(id, month_id, template_id, name, budgeted_cents, type, carry_forward, sort_order, active, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			allocation.ID, allocation.MonthID, shared.NullString(allocation.TemplateID), allocation.Name,
+			allocation.BudgetedCents, allocation.Type, boolInt(allocation.CarryForward), allocation.SortOrder,
+			boolInt(allocation.Active), allocation.CreatedAt, allocation.UpdatedAt); err != nil {
+			return fmt.Errorf("create reviewed wallet allocation: %w", err)
+		}
+		if err := insertAllocationDefaultCategories(ctx, tx, allocation.ID, categoryIDs(allocation.DefaultCategories), allocation.CreatedAt); err != nil {
 			return err
 		}
-		incomeItems, allocations, err := r.reviewedPreviewRows(ctx, tx, month, req)
-		if err != nil {
-			return err
-		}
-		for _, item := range incomeItems {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_income_items
-				(id, month_id, name, amount_cents, received_date, applies_to_month, notes, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				item.ID, item.MonthID, item.Name, item.AmountCents, shared.NullString(item.ReceivedDate),
-				item.AppliesToMonth, shared.NullString(item.Notes), item.CreatedAt, item.UpdatedAt); err != nil {
-				return fmt.Errorf("create reviewed wallet income: %w", err)
-			}
-		}
-		for _, allocation := range allocations {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_allocations
-				(id, month_id, template_id, name, budgeted_cents, type, carry_forward, sort_order, active, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				allocation.ID, allocation.MonthID, shared.NullString(allocation.TemplateID), allocation.Name,
-				allocation.BudgetedCents, allocation.Type, boolInt(allocation.CarryForward), allocation.SortOrder,
-				boolInt(allocation.Active), allocation.CreatedAt, allocation.UpdatedAt); err != nil {
-				return fmt.Errorf("create reviewed wallet allocation: %w", err)
-			}
-			if err := insertAllocationDefaultCategories(ctx, tx, allocation.ID, categoryIDs(allocation.DefaultCategories), month.CreatedAt); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 func (r *Repository) previewMonthShell(ctx context.Context, req CreateMonthRequest) (Month, error) {

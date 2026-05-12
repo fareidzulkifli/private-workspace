@@ -1297,6 +1297,24 @@ function MonthPreviewPanel({
   previewInvalid,
   previewErrors,
 }) {
+  const previewIncomeTotal = (preview.income_items || []).reduce((sum, item) => {
+    try {
+      return sum + parseCents(item.amount_input ?? moneyInputValue(item.amount_cents), 'Income amount')
+    } catch {
+      return sum + (item.amount_cents || 0)
+    }
+  }, 0)
+  const previewAllocationTotal = (preview.allocations || []).reduce((sum, item) => {
+    try {
+      return sum + parseCents(item.amount_input ?? moneyInputValue(item.budgeted_cents), 'Allocation amount')
+    } catch {
+      return sum + (item.budgeted_cents || 0)
+    }
+  }, 0)
+  const previewWalletBalance = preview.auto_wallet_balance
+    ? preview.month.opening_balance_cents + previewIncomeTotal
+    : preview.month.wallet_balance_cents
+
   return (
     <section className="wallet-panel wallet-preview-panel">
       <div className="wallet-panel-header">
@@ -1314,9 +1332,9 @@ function MonthPreviewPanel({
       </div>
       <div className="wallet-preview-summary">
         <SummaryMetric label="Opening" value={preview.month.opening_balance_cents} />
-        <SummaryMetric label="Wallet" value={preview.month.wallet_balance_cents} />
-        <SummaryMetric label="Income Rows" value={(preview.income_items || []).reduce((sum, item) => sum + (item.amount_cents || 0), 0)} tone="good" />
-        <SummaryMetric label="Allocation Rows" value={(preview.allocations || []).reduce((sum, item) => sum + (item.budgeted_cents || 0), 0)} />
+        <SummaryMetric label="Wallet" value={previewWalletBalance} />
+        <SummaryMetric label="Income Rows" value={previewIncomeTotal} tone="good" />
+        <SummaryMetric label="Allocation Rows" value={previewAllocationTotal} />
       </div>
       <div className="wallet-preview-grid">
         <div>
@@ -2902,7 +2920,7 @@ export default function WalletRoute() {
     setError(null)
     try {
       const opening = parseCents(createForm.opening, 'Opening balance')
-      const wallet = createForm.wallet.trim() ? parseCents(createForm.wallet, 'Wallet balance') : opening
+      const wallet = createForm.wallet.trim() ? parseCents(createForm.wallet, 'Wallet balance') : null
       const preview = await api.post('/api/wallet/months/preview', {
         month: monthKey,
         opening_balance_cents: opening,
@@ -2912,6 +2930,7 @@ export default function WalletRoute() {
       })
       setMonthPreview({
         ...preview,
+        auto_wallet_balance: wallet === null,
         income_items: (preview.income_items || []).map(item => ({
           ...item,
           amount_input: moneyInputValue(item.amount_cents),
@@ -2951,7 +2970,7 @@ export default function WalletRoute() {
       await api.post('/api/wallet/months', {
         month: monthPreview.month.month,
         opening_balance_cents: monthPreview.month.opening_balance_cents,
-        wallet_balance_cents: monthPreview.month.wallet_balance_cents,
+        wallet_balance_cents: monthPreview.auto_wallet_balance ? null : monthPreview.month.wallet_balance_cents,
         income_items: (monthPreview.income_items || []).map(item => ({
           name: item.name,
           amount_cents: parseCents(item.amount_input ?? moneyInputValue(item.amount_cents), 'Income amount'),

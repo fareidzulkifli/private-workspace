@@ -176,11 +176,9 @@ func TestWalletAPISummaryFlow(t *testing.T) {
 		t.Fatalf("patched template = %#v", patchedTemplate)
 	}
 
-	walletBalance := float64(598000)
 	month := apiJSON[map[string]any](t, router, http.MethodPost, "/api/wallet/months", jsonBody(map[string]any{
 		"month":                 "2026-05",
 		"opening_balance_cents": 100000,
-		"wallet_balance_cents":  walletBalance,
 		"use_templates":         true,
 	}), cookie, csrf, http.StatusCreated)
 	if month["month"] != "2026-05" {
