@@ -1284,6 +1284,19 @@ select.is-invalid {
   text-align: right;
 }
 
+.wallet-desktop-balance-summary .wallet-balance-line strong {
+  font-weight: 400;
+}
+
+.wallet-desktop-balance-summary .wallet-balance-line-emphasis span,
+.wallet-desktop-balance-summary .wallet-balance-line-emphasis strong {
+  font-weight: 750;
+}
+
+.wallet-desktop-balance-summary .wallet-balance-line-emphasis span {
+  color: var(--text);
+}
+
 .wallet-balance-line-good strong {
   color: var(--success);
 }
@@ -1524,12 +1537,12 @@ select.is-invalid {
 .wallet-allocation-summary-row {
   align-items: center;
   display: grid;
-  gap: 14px;
-  grid-template-columns: minmax(0, 1fr) minmax(118px, auto) 30px;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) minmax(118px, auto) 54px 30px;
 }
 
 .wallet-allocation-header-row {
-  background: var(--surface);
+  background: var(--surface-alt);
   border-bottom: 1px solid var(--border);
   color: var(--text-muted);
   font-size: 10px;
@@ -1592,7 +1605,7 @@ select.is-invalid {
   color: var(--text);
   display: block;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 400;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1639,6 +1652,23 @@ select.is-invalid {
   width: 28px;
 }
 
+.wallet-allocation-paid-btn {
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 750;
+  height: 28px;
+  justify-self: end;
+  letter-spacing: 0.04em;
+  padding: 0 8px;
+  width: 54px;
+}
+
+.wallet-allocation-paid-btn:disabled {
+  color: var(--text-disabled);
+}
+
+.wallet-allocation-paid-btn:hover:not(:disabled),
 .wallet-allocation-expand-btn:hover:not(:disabled) {
   background: var(--surface-alt);
   color: var(--text);
@@ -3128,7 +3158,12 @@ select.is-invalid {
 
   .wallet-allocation-header-row,
   .wallet-allocation-summary-row {
-    grid-template-columns: minmax(0, 1fr) minmax(92px, auto) 30px;
+    gap: 7px;
+    grid-template-columns: minmax(0, 1fr) minmax(82px, auto) 48px 30px;
+  }
+
+  .wallet-allocation-paid-btn {
+    width: 48px;
   }
 
   .wallet-book-money {

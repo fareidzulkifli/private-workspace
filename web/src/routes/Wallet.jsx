@@ -273,9 +273,9 @@ function WalletBalanceCard({ children }) {
   )
 }
 
-function WalletBalanceLine({ label, value, tone }) {
+function WalletBalanceLine({ label, value, tone, emphasis = false }) {
   return (
-    <div className={`wallet-balance-line ${tone ? `wallet-balance-line-${tone}` : ''}`}>
+    <div className={`wallet-balance-line ${tone ? `wallet-balance-line-${tone}` : ''} ${emphasis ? 'wallet-balance-line-emphasis' : ''}`.trim()}>
       <span>{label}</span>
       <strong>{formatMoney(value)}</strong>
     </div>
@@ -307,6 +307,7 @@ function WalletBalanceSummary({ summary, className = '' }) {
           label="Available Balance"
           value={summary.available_balance_cents}
           tone={summary.available_balance_cents < 0 ? 'bad' : 'good'}
+          emphasis
         />
       </WalletBalanceCard>
     </section>
@@ -2533,6 +2534,11 @@ export default function WalletRoute() {
     [summary]
   )
 
+  const paidCategory = useMemo(
+    () => (summary?.categories || []).find(category => category.system_key === 'unsorted'),
+    [summary]
+  )
+
   const selectedTransactionAllocation = useMemo(
     () => activeAllocations.find(allocation => allocation.id === transactionForm.allocationId) || activeAllocations[0],
     [activeAllocations, transactionForm.allocationId]
@@ -3264,6 +3270,36 @@ export default function WalletRoute() {
       setTransactionTouched({})
       await load()
       focusTransactionAmount(focusTarget)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const payAllocation = async (allocation) => {
+    if (!allocation || saving || monthClosed || allocation.remaining_cents <= 0 || !paidCategory?.id) return
+    setSaving(true)
+    setError(null)
+    try {
+      const created = await api.post(`/api/wallet/months/${monthKey}/transactions`, {
+        allocation_id: allocation.id,
+        category_id: paidCategory.id,
+        date: localDateKey(),
+        amount_cents: allocation.remaining_cents,
+        note: `Paid: ${allocation.name}`,
+        rounded: false,
+      })
+      const responseLabel = created?.allocation_name && created?.category_name
+        ? `${created.allocation_name} / ${created.category_name}`
+        : `${allocation.name} / ${paidCategory.name}`
+      showTransactionNotice({
+        id: created?.id || null,
+        label: responseLabel,
+        amountCents: created?.amount_cents ?? allocation.remaining_cents,
+        createdAt: Date.now(),
+      })
+      await load()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -4121,17 +4157,38 @@ export default function WalletRoute() {
                       <span>Envelope</span>
                       <span>Amount Payable</span>
                       <span aria-hidden="true" />
+                      <span aria-hidden="true" />
                     </div>
                     {visibleAllocations.length === 0 ? (
                       <div className="wallet-empty-row">No payable envelopes.</div>
                     ) : visibleAllocations.map(allocation => {
                       const editingBudget = allocationBudgetEdit?.id === allocation.id
                       const expanded = expandedAllocationID === allocation.id || editingBudget
+                      const payDisabled = saving || monthClosed || allocation.remaining_cents <= 0 || !paidCategory?.id
+                      const payTitle = saving
+                        ? 'Saving wallet change'
+                        : monthClosed
+                          ? 'Reopen this month before marking envelopes paid'
+                          : !paidCategory?.id
+                            ? 'Unsorted category is unavailable'
+                            : allocation.remaining_cents <= 0
+                              ? 'Envelope has no payable amount'
+                              : `Mark ${allocation.name} as paid`
                       return (
                         <div key={allocation.id} className={`wallet-allocation-row ${allocation.remaining_cents < 0 ? 'is-overspent' : ''} ${allocation.remaining_cents === 0 ? 'is-zero-payable' : ''} ${expanded ? 'is-expanded' : ''}`}>
                           <div className="wallet-allocation-summary-row">
                             <strong title={allocation.name}>{allocation.name}</strong>
                             <strong className="wallet-allocation-payable">{formatMoney(allocation.remaining_cents)}</strong>
+                            <button
+                              type="button"
+                              className="btn-ghost wallet-allocation-paid-btn"
+                              onClick={() => payAllocation(allocation)}
+                              disabled={payDisabled}
+                              title={payTitle}
+                              aria-label={payDisabled ? `${allocation.name} cannot be marked paid` : `Mark ${allocation.name} as paid`}
+                            >
+                              PAID
+                            </button>
                             <button
                               type="button"
                               className="btn-ghost wallet-allocation-expand-btn"
