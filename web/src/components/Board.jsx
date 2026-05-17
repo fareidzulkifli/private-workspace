@@ -23,6 +23,11 @@ import {
 // Priority score: urgent+important(0) > urgent(1) > important(2) > none(3)
 const priorityScore = (t) => (t.urgent && t.important) ? 0 : t.urgent ? 1 : t.important ? 2 : 3
 
+const projectOrderValue = (project) => {
+  const value = Number(project?.order_index)
+  return Number.isFinite(value) ? value : 0
+}
+
 // Done tasks sink to the bottom; within each group sort by priority, then
 // order_index (preserves drag-and-drop reordering), then created_at as tiebreaker
 const sortTasks = (taskList) =>
@@ -72,6 +77,7 @@ export default function Board({ orgId }) {
   const [archivedLoading, setArchivedLoading] = useState(false)
   const [archivedError, setArchivedError] = useState(null)
   const [restoringProjectId, setRestoringProjectId] = useState(null)
+  const [projectOrderSaving, setProjectOrderSaving] = useState(false)
 
   // New Project Modal State
   const [isProjectModalOpen, setIsProjectModalOpen] = useState(false)
@@ -122,6 +128,46 @@ export default function Board({ orgId }) {
   useEffect(() => {
     if (orgId) fetchData(true)
   }, [orgId])
+
+  const handleProjectsReordered = async (orderedProjects) => {
+    if (projectOrderSaving) return
+
+    const previousProjects = projects
+    const previousById = new Map(previousProjects.map(project => [project.id, project]))
+    const normalizedProjects = orderedProjects.map((project, index) => ({
+      ...project,
+      order_index: index,
+    }))
+    const changedProjects = normalizedProjects.filter(project => {
+      const previousProject = previousById.get(project.id)
+      return projectOrderValue(previousProject) !== project.order_index
+    })
+
+    setProjects(normalizedProjects)
+    if (changedProjects.length === 0) return
+
+    try {
+      setProjectOrderSaving(true)
+      await Promise.all(changedProjects.map(async project => {
+        const res = await fetch(`/api/projects/${project.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ order_index: project.order_index }),
+        })
+        const updatedProject = await res.json()
+        if (!res.ok || updatedProject.error) {
+          throw new Error(updatedProject.error || `Failed to save ${project.name}`)
+        }
+      }))
+      window.dispatchEvent(new Event('taskUpdated'))
+    } catch (err) {
+      alert('Error saving project order: ' + err.message)
+      setProjects(previousProjects)
+      await fetchData(false)
+    } finally {
+      setProjectOrderSaving(false)
+    }
+  }
 
   const handleTaskCreated = (newTask) => {
     setTasks(prev => [...prev, newTask])
@@ -368,6 +414,7 @@ export default function Board({ orgId }) {
 
       {/* Main List Area */}
       <ListView
+        orgId={orgId}
         projects={projects}
         tasks={tasks}
         onTaskClick={openTaskModal}
@@ -378,6 +425,8 @@ export default function Board({ orgId }) {
         onProjectDeleted={handleProjectDeleted}
         onProjectUpdated={handleProjectUpdated}
         onProjectArchived={handleProjectArchived}
+        onProjectsReordered={handleProjectsReordered}
+        isProjectOrderSaving={projectOrderSaving}
       />
 
       {/* Completed Tasks Modal */}
@@ -386,8 +435,8 @@ export default function Board({ orgId }) {
           className="modal-overlay"
           onClick={(e) => e.target.classList.contains('modal-overlay') && setCompletedTasksProject(null)}
         >
-          <div className="modal-content" style={{ width: '600px', maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}>
-            <div style={{
+          <div className="modal-content task-history-modal" style={{ width: '600px', maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}>
+            <div className="task-history-modal-header" style={{
               padding: '20px 24px',
               borderBottom: '1px solid var(--border)',
               display: 'flex',
@@ -395,9 +444,9 @@ export default function Board({ orgId }) {
               justifyContent: 'space-between',
               background: 'var(--surface-alt)'
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div className="task-history-modal-title-wrap" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                 <History size={18} color="var(--text-muted)" />
-                <h3 style={{ fontSize: '14px', fontWeight: '700', letterSpacing: '-0.02em' }}>
+                <h3 className="task-history-modal-title" style={{ fontSize: '14px', fontWeight: '700', letterSpacing: '-0.02em' }}>
                   Completed Tasks: {completedTasksProject.name}
                 </h3>
               </div>
@@ -406,7 +455,7 @@ export default function Board({ orgId }) {
               </button>
             </div>
 
-            <div style={{ overflowY: 'auto', padding: '24px', flexGrow: 1, display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <div className="task-history-modal-body" style={{ overflowY: 'auto', padding: '24px', flexGrow: 1, display: 'flex', flexDirection: 'column', gap: '12px' }}>
               {tasks
                 .filter(t => t.project_id === completedTasksProject.id && t.status === 'Done')
                 .sort((a, b) => {
@@ -415,7 +464,7 @@ export default function Board({ orgId }) {
                   return new Date(dateB) - new Date(dateA)
                 })
                 .map(task => (
-                  <div key={task.id} style={{
+                  <div key={task.id} className="task-history-row" style={{
                     padding: '12px 16px',
                     background: 'var(--surface)',
                     border: '1px solid var(--border-strong)',
@@ -425,10 +474,10 @@ export default function Board({ orgId }) {
                     justifyContent: 'space-between',
                     opacity: 0.7
                   }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div className="task-history-row-main" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                       <Check size={16} color="var(--success)" />
                       <div>
-                        <div style={{ fontSize: '13px', fontWeight: '500', color: 'var(--text-disabled)', textDecoration: 'line-through' }}>{task.summary}</div>
+                        <div className="task-history-task-title" style={{ fontSize: '13px', fontWeight: '500', color: 'var(--text-disabled)', textDecoration: 'line-through' }}>{task.summary}</div>
                         <button
                           type="button"
                           onClick={() => openCompletedAtEditor(task)}
@@ -453,7 +502,7 @@ export default function Board({ orgId }) {
                         </button>
                       </div>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div className="task-history-actions" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <button
                         onClick={() => openTaskModal(task)}
                         className="btn-ghost"
@@ -475,7 +524,7 @@ export default function Board({ orgId }) {
                 ))
               }
               {tasks.filter(t => t.project_id === completedTasksProject.id && t.status === 'Done').length === 0 && (
-                <div style={{ textAlign: 'center', color: 'var(--text-disabled)', fontSize: '12px', padding: '32px' }}>
+                <div className="task-history-empty" style={{ textAlign: 'center', color: 'var(--text-disabled)', fontSize: '12px', padding: '32px' }}>
                   No completed tasks found in archive.
                 </div>
               )}

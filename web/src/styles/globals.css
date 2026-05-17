@@ -4504,7 +4504,7 @@ select.is-invalid {
   /* Project section headers — Asana-inspired flat, compact */
   .project-section-header {
     background: var(--background) !important; /* Match app bg for seamless table integration */
-    padding: 8px 12px !important;
+    padding: 10px !important;
     position: sticky;
     top: 0;
     z-index: 40;
@@ -4635,6 +4635,102 @@ select.is-invalid {
     padding: 24px 20px !important;
     background: var(--background) !important;
     overflow: visible !important;
+  }
+
+  .task-history-modal {
+    width: 100% !important;
+    max-width: none !important;
+    max-height: calc(100vh - 40px) !important;
+    border-radius: 12px !important;
+    overflow: hidden !important;
+  }
+
+  .task-history-modal-header {
+    align-items: flex-start !important;
+    gap: 10px !important;
+    padding: 12px 14px !important;
+  }
+
+  .task-history-modal-title-wrap {
+    flex: 1;
+    gap: 8px !important;
+    min-width: 0;
+  }
+
+  .task-history-modal-title {
+    display: -webkit-box;
+    font-size: 13px !important;
+    letter-spacing: 0 !important;
+    line-height: 1.25 !important;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  .task-history-modal-body {
+    gap: 8px !important;
+    padding: 10px !important;
+  }
+
+  .task-history-row {
+    align-items: flex-start !important;
+    background: var(--surface) !important;
+    border: 1px solid var(--border-strong) !important;
+    border-radius: 6px !important;
+    flex-direction: column !important;
+    gap: 10px !important;
+    opacity: 0.82 !important;
+    padding: 10px !important;
+  }
+
+  .task-history-row-main {
+    align-items: flex-start !important;
+    gap: 8px !important;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .task-history-row-main > svg {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .task-history-row-main > div {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .task-history-task-title {
+    font-size: 12px !important;
+    line-height: 1.35 !important;
+    overflow-wrap: anywhere;
+    white-space: normal !important;
+    word-break: break-word;
+  }
+
+  .task-history-row-main button {
+    line-height: 1.3 !important;
+    max-width: 100%;
+    text-align: left;
+    white-space: normal !important;
+  }
+
+  .task-history-actions {
+    flex-wrap: wrap;
+    gap: 6px !important;
+    justify-content: flex-end !important;
+    width: 100%;
+  }
+
+  .task-history-actions .btn-ghost {
+    font-size: 11px !important;
+    min-height: 30px !important;
+    padding: 6px 9px !important;
+  }
+
+  .task-history-empty {
+    padding: 24px 12px !important;
   }
 
   /* 9. Dashboard */
@@ -7191,4 +7287,133 @@ select.is-invalid {
   border-radius: 6px;
   border: 1px solid var(--gn-border);
   object-fit: contain;
+}
+
+/* =====================================================================
+   TASK PROJECT ACCORDION + REORDERING
+   ===================================================================== */
+
+.project-drag-handle {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-disabled);
+  cursor: grab;
+  display: inline-flex;
+  flex-shrink: 0;
+  height: 24px;
+  justify-content: center;
+  padding: 0;
+  width: 24px;
+}
+
+.project-drag-handle:active:not(:disabled) {
+  cursor: grabbing;
+}
+
+.project-drag-handle:hover:not(:disabled) {
+  background: var(--surface-alt);
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+.project-drag-handle:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.task-project-section.is-project-dragging {
+  opacity: 0.55;
+}
+
+.task-project-section.is-project-drag-target {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.task-project-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition:
+    grid-template-rows 160ms cubic-bezier(0.2, 0, 0, 1),
+    opacity 120ms ease;
+}
+
+.task-project-body.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.task-project-body-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+[data-theme='light'] .task-project-header {
+  background: #2b4963 !important;
+  border-bottom-color: rgba(255, 255, 255, 0.24) !important;
+  color: #fff;
+}
+
+[data-theme='light'] .task-project-header .project-title,
+[data-theme='light'] .task-project-header .project-toggle-btn,
+[data-theme='light'] .task-project-header .project-detail-btn,
+[data-theme='light'] .task-project-header .project-drag-handle,
+[data-theme='light'] .task-project-header .mobile-project-menu-trigger,
+[data-theme='light'] .task-project-header .mobile-add-btn {
+  color: #fff !important;
+}
+
+[data-theme='light'] .task-project-header .project-toggle-btn:hover:not(:disabled),
+[data-theme='light'] .task-project-header .project-detail-btn:hover:not(:disabled),
+[data-theme='light'] .task-project-header .project-drag-handle:hover:not(:disabled),
+[data-theme='light'] .task-project-header .mobile-project-menu-trigger:hover:not(:disabled),
+[data-theme='light'] .task-project-header .mobile-add-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16) !important;
+  border-color: rgba(255, 255, 255, 0.24) !important;
+  color: #fff !important;
+}
+
+[data-theme='light'] .task-project-header .project-task-count {
+  background: rgba(255, 255, 255, 0.18) !important;
+  border-color: rgba(255, 255, 255, 0.26) !important;
+  color: #fff !important;
+}
+
+[data-theme='light'] .task-project-header .project-header-divider {
+  background: rgba(255, 255, 255, 0.28) !important;
+}
+
+[data-theme='light'] .task-project-header .lv-pill-btn {
+  background: rgba(255, 255, 255, 0.10) !important;
+  border-color: rgba(255, 255, 255, 0.28) !important;
+  color: #fff !important;
+}
+
+[data-theme='light'] .task-project-header .lv-pill-btn:hover {
+  background: rgba(255, 255, 255, 0.18) !important;
+  border-color: rgba(255, 255, 255, 0.38) !important;
+  color: #fff !important;
+}
+
+[data-theme='light'] .task-project-header .lv-pill-btn-primary {
+  background: #fff !important;
+  border-color: #fff !important;
+  color: #2b4963 !important;
+}
+
+[data-theme='light'] .task-project-header .lv-pill-btn-primary:hover {
+  background: rgba(255, 255, 255, 0.92) !important;
+  border-color: rgba(255, 255, 255, 0.92) !important;
+  color: #223a50 !important;
+}
+
+[data-theme='light'] .task-project-header .mobile-add-btn {
+  background: rgba(255, 255, 255, 0.10) !important;
+  border-color: rgba(255, 255, 255, 0.34) !important;
 }

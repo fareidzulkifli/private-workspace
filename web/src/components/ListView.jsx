@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ChevronRight,
   ChevronDown,
@@ -16,12 +16,140 @@ import {
   ArrowRight,
   History,
   Info,
-  Trash2
+  Trash2,
+  GripVertical
 } from 'lucide-react'
 import ProjectModal from './ProjectModal'
 
-export default function ListView({ projects, tasks, onTaskClick, onTaskPatch, onViewCompleted, onTaskCreated, onTaskDeleted, onProjectDeleted, onProjectUpdated, onProjectArchived }) {
+const projectOrderValue = (project) => {
+  const value = Number(project.order_index)
+  return Number.isFinite(value) ? value : 0
+}
+
+const createdTimeValue = (project) => {
+  const value = new Date(project.created_at).getTime()
+  return Number.isFinite(value) ? value : 0
+}
+
+const moveProject = (projectList, activeId, overId) => {
+  const activeIndex = projectList.findIndex(project => project.id === activeId)
+  const overIndex = projectList.findIndex(project => project.id === overId)
+  if (activeIndex < 0 || overIndex < 0 || activeIndex === overIndex) return null
+
+  const next = [...projectList]
+  const [movedProject] = next.splice(activeIndex, 1)
+  next.splice(overIndex, 0, movedProject)
+  return next
+}
+
+export default function ListView({ orgId, projects, tasks, onTaskClick, onTaskPatch, onViewCompleted, onTaskCreated, onTaskDeleted, onProjectDeleted, onProjectUpdated, onProjectArchived, onProjectsReordered, isProjectOrderSaving = false }) {
   const [expandedTaskId, setExpandedTaskId] = useState(null)
+  const [expandedProjectIds, setExpandedProjectIds] = useState([])
+  const [draggedProjectId, setDraggedProjectId] = useState(null)
+  const [dragOverProjectId, setDragOverProjectId] = useState(null)
+  const initializedOrgRef = useRef(null)
+  const knownProjectIdsRef = useRef([])
+  const draggedProjectIdRef = useRef(null)
+
+  const orderedProjects = useMemo(() => {
+    return [...projects].sort((a, b) => {
+      const orderDiff = projectOrderValue(a) - projectOrderValue(b)
+      if (orderDiff !== 0) return orderDiff
+      return createdTimeValue(a) - createdTimeValue(b)
+    })
+  }, [projects])
+
+  const projectIds = useMemo(() => orderedProjects.map(project => project.id).join('|'), [orderedProjects])
+
+  useEffect(() => {
+    if (orderedProjects.length === 0) {
+      initializedOrgRef.current = null
+      knownProjectIdsRef.current = []
+      setExpandedProjectIds([])
+      return
+    }
+
+    const orderedProjectIds = orderedProjects.map(project => project.id)
+
+    if (initializedOrgRef.current !== orgId) {
+      initializedOrgRef.current = orgId
+      knownProjectIdsRef.current = orderedProjectIds
+      setExpandedProjectIds(orderedProjectIds)
+      return
+    }
+
+    const knownProjectIds = new Set(knownProjectIdsRef.current)
+    knownProjectIdsRef.current = orderedProjectIds
+    setExpandedProjectIds(prev => {
+      const availableProjectIds = new Set(orderedProjects.map(project => project.id))
+      const next = prev.filter(projectId => availableProjectIds.has(projectId))
+      orderedProjectIds.forEach(projectId => {
+        if (!knownProjectIds.has(projectId)) next.push(projectId)
+      })
+      return next
+    })
+  }, [orgId, orderedProjects, projectIds])
+
+  const resetProjectDrag = () => {
+    draggedProjectIdRef.current = null
+    setDraggedProjectId(null)
+    setDragOverProjectId(null)
+  }
+
+  const handleToggleProject = (projectId) => {
+    setExpandedProjectIds(prev => (
+      prev.includes(projectId)
+        ? prev.filter(id => id !== projectId)
+        : [...prev, projectId]
+    ))
+  }
+
+  const handleProjectDragStart = (event, projectId) => {
+    if (isProjectOrderSaving) {
+      event.preventDefault()
+      return
+    }
+    event.stopPropagation()
+    draggedProjectIdRef.current = projectId
+    setDraggedProjectId(projectId)
+    setDragOverProjectId(null)
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', projectId)
+  }
+
+  const handleProjectDragOver = (event, projectId) => {
+    const activeProjectId = draggedProjectIdRef.current || draggedProjectId
+    if (!activeProjectId || isProjectOrderSaving) return
+    if (activeProjectId === projectId) {
+      setDragOverProjectId(null)
+      return
+    }
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    setDragOverProjectId(projectId)
+  }
+
+  const handleProjectDrop = (event, projectId) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const activeProjectId = draggedProjectIdRef.current || event.dataTransfer.getData('text/plain')
+    if (!activeProjectId || activeProjectId === projectId || isProjectOrderSaving) {
+      resetProjectDrag()
+      return
+    }
+
+    const nextProjects = moveProject(orderedProjects, activeProjectId, projectId)
+    resetProjectDrag()
+    if (nextProjects) {
+      onProjectsReordered?.(nextProjects.map((project, index) => ({ ...project, order_index: index })))
+    }
+  }
+
+  const handleProjectDragLeave = (event, projectId) => {
+    if (!event.currentTarget.contains(event.relatedTarget) && dragOverProjectId === projectId) {
+      setDragOverProjectId(null)
+    }
+  }
 
   const headers = [
     { label: 'Status', align: 'center' },
@@ -64,7 +192,7 @@ export default function ListView({ projects, tasks, onTaskClick, onTaskPatch, on
         ))}
       </div>
 
-      {projects.map(project => {
+      {orderedProjects.map(project => {
         const priorityScore = (t) => (t.urgent && t.important) ? 0 : t.urgent ? 1 : t.important ? 2 : 3
         const projectTasks = tasks.filter(t => t.project_id === project.id && t.status !== 'Done')
           .sort((a, b) => {
@@ -78,6 +206,8 @@ export default function ListView({ projects, tasks, onTaskClick, onTaskPatch, on
             key={project.id}
             project={project}
             tasks={projectTasks}
+            isExpanded={expandedProjectIds.includes(project.id)}
+            onToggleProject={() => handleToggleProject(project.id)}
             onTaskClick={onTaskClick}
             onTaskPatch={onTaskPatch}
             onViewCompleted={() => onViewCompleted(project)}
@@ -88,6 +218,14 @@ export default function ListView({ projects, tasks, onTaskClick, onTaskPatch, on
             onProjectDeleted={onProjectDeleted}
             onProjectUpdated={onProjectUpdated}
             onProjectArchived={onProjectArchived}
+            onProjectDragStart={handleProjectDragStart}
+            onProjectDragOver={handleProjectDragOver}
+            onProjectDragLeave={handleProjectDragLeave}
+            onProjectDrop={handleProjectDrop}
+            onProjectDragEnd={resetProjectDrag}
+            isProjectDragging={draggedProjectId === project.id}
+            isProjectDragTarget={dragOverProjectId === project.id}
+            isProjectOrderSaving={isProjectOrderSaving}
           />
         )
       })}
@@ -109,8 +247,9 @@ export default function ListView({ projects, tasks, onTaskClick, onTaskPatch, on
   )
 }
 
-function ProjectGroup({ project, tasks, onTaskClick, onTaskPatch, onViewCompleted, expandedTaskId, onToggleExpand, onTaskCreated, onTaskDeleted, onProjectDeleted, onProjectUpdated, onProjectArchived }) {
-  const [isExpanded, setIsExpanded] = useState(true)
+function ProjectGroup({ project, tasks, isExpanded, onToggleProject, onTaskClick, onTaskPatch, onViewCompleted, expandedTaskId, onToggleExpand, onTaskCreated, onTaskDeleted, onProjectDeleted, onProjectUpdated, onProjectArchived, onProjectDragStart, onProjectDragOver, onProjectDragLeave, onProjectDrop, onProjectDragEnd, isProjectDragging, isProjectDragTarget, isProjectOrderSaving }) {
+  const [shouldRenderTasks, setShouldRenderTasks] = useState(isExpanded)
+  const [isBodyOpen, setIsBodyOpen] = useState(isExpanded)
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
   const [newTaskSummary, setNewTaskSummary] = useState('')
@@ -118,6 +257,21 @@ function ProjectGroup({ project, tasks, onTaskClick, onTaskPatch, onViewComplete
   const [newTaskImportant, setNewTaskImportant] = useState(false)
   const [loading, setLoading] = useState(false)
   const [detailProject, setDetailProject] = useState(null)
+
+  useEffect(() => {
+    if (isExpanded) {
+      setShouldRenderTasks(true)
+      const frame = requestAnimationFrame(() => setIsBodyOpen(true))
+      return () => cancelAnimationFrame(frame)
+    }
+
+    setIsBodyOpen(false)
+  }, [isExpanded])
+
+  const handleBodyTransitionEnd = (event) => {
+    if (event.target !== event.currentTarget || event.propertyName !== 'grid-template-rows') return
+    if (!isExpanded) setShouldRenderTasks(false)
+  }
 
   const handleOpenCreate = (e) => {
     e.stopPropagation()
@@ -197,22 +351,50 @@ function ProjectGroup({ project, tasks, onTaskClick, onTaskPatch, onViewComplete
       )}
 
       {/* Flat section — no card wrapper */}
-      <div className="project-section task-project-section">
+      <div
+        className={`project-section task-project-section ${isProjectDragging ? 'is-project-dragging' : ''} ${isProjectDragTarget ? 'is-project-drag-target' : ''}`}
+        onDragOver={(event) => onProjectDragOver(event, project.id)}
+        onDragLeave={(event) => onProjectDragLeave(event, project.id)}
+        onDrop={(event) => onProjectDrop(event, project.id)}
+      >
         {/* Section Header */}
         <div
           className="project-section-header task-project-header"
+          onClick={() => {
+            if (window.getSelection().toString().length === 0) {
+              onToggleProject()
+            }
+          }}
           style={{
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            padding: '20px 16px 10px 16px',
+            padding: '10px',
             borderBottom: '1px solid var(--border)',
+            cursor: 'pointer',
           }}
         >
           {/* Left: collapse toggle + name + details btn + count */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <button
-              onClick={() => setIsExpanded(!isExpanded)}
+              type="button"
+              draggable={!isProjectOrderSaving}
+              onDragStart={(event) => onProjectDragStart(event, project.id)}
+              onDragEnd={onProjectDragEnd}
+              onClick={(event) => event.stopPropagation()}
+              className="project-drag-handle"
+              title="Drag to reorder project"
+              aria-label={`Drag to reorder ${project.name}`}
+              disabled={isProjectOrderSaving}
+            >
+              <GripVertical size={14} />
+            </button>
+            <button
+              onClick={(event) => {
+                event.stopPropagation()
+                onToggleProject()
+              }}
+              className="project-toggle-btn"
               style={{
                 background: 'transparent',
                 border: 'none',
@@ -227,17 +409,12 @@ function ProjectGroup({ project, tasks, onTaskClick, onTaskPatch, onViewComplete
               {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             </button>
             <span
-              onClick={() => {
-                if (window.getSelection().toString().length === 0) {
-                  setIsExpanded(!isExpanded)
-                }
-              }}
+              className="project-title"
               style={{
                 fontSize: '13px',
                 fontWeight: '700',
                 color: 'var(--text)',
                 letterSpacing: '-0.01em',
-                cursor: 'pointer',
               }}
             >
               {project.name}
@@ -245,6 +422,7 @@ function ProjectGroup({ project, tasks, onTaskClick, onTaskPatch, onViewComplete
             <button
               onClick={(e) => { e.stopPropagation(); handleEditProject(); }}
               title="Project Details"
+              className="project-detail-btn"
               style={{
                 background: 'transparent',
                 border: 'none',
@@ -292,7 +470,7 @@ function ProjectGroup({ project, tasks, onTaskClick, onTaskPatch, onViewComplete
               >
                 <Trash2 size={12} />
               </button>
-              <div style={{ width: '1px', height: '14px', background: 'var(--border-strong)', margin: '0 4px' }} />
+              <div className="project-header-divider" style={{ width: '1px', height: '14px', background: 'var(--border-strong)', margin: '0 4px' }} />
               <button
                 onClick={handleOpenCreate}
                 className="lv-pill-btn lv-pill-btn-primary"
@@ -321,7 +499,7 @@ function ProjectGroup({ project, tasks, onTaskClick, onTaskPatch, onViewComplete
             <div className="mobile-project-menu" style={{ position: 'relative' }}>
               <button
                 onClick={(e) => { e.stopPropagation(); setShowMenu(!showMenu); }}
-                className="btn-ghost"
+                className="btn-ghost mobile-project-menu-trigger"
                 style={{ padding: '4px', height: 'auto', color: 'var(--text-muted)' }}
               >
                 <MoreVertical size={16} />
@@ -378,32 +556,40 @@ function ProjectGroup({ project, tasks, onTaskClick, onTaskPatch, onViewComplete
         </div>
 
         {/* Task Rows */}
-        {isExpanded && (
-          <div>
-            {tasks.map(task => (
-              <TaskRow
-                key={task.id}
-                task={task}
-                onTaskClick={onTaskClick}
-                onTaskPatch={onTaskPatch}
-                isExpanded={expandedTaskId === task.id}
-                onToggleExpand={() => onToggleExpand(task.id)}
-                onTaskDeleted={onTaskDeleted}
-              />
-            ))}
-            {tasks.length === 0 && (
-              <div className="task-empty-row" style={{
-                padding: '14px 16px 14px 64px',
-                fontSize: '11px',
-                color: 'var(--text-disabled)',
-                fontStyle: 'italic',
-                borderBottom: '1px solid var(--border)'
-              }}>
-                No active tasks
-              </div>
+        <div
+          className={`task-project-body ${isBodyOpen ? 'is-open' : 'is-closed'}`}
+          onTransitionEnd={handleBodyTransitionEnd}
+          aria-hidden={!isExpanded}
+        >
+          <div className="task-project-body-inner">
+            {shouldRenderTasks && (
+              <>
+                {tasks.map(task => (
+                  <TaskRow
+                    key={task.id}
+                    task={task}
+                    onTaskClick={onTaskClick}
+                    onTaskPatch={onTaskPatch}
+                    isExpanded={expandedTaskId === task.id}
+                    onToggleExpand={() => onToggleExpand(task.id)}
+                    onTaskDeleted={onTaskDeleted}
+                  />
+                ))}
+                {tasks.length === 0 && (
+                  <div className="task-empty-row" style={{
+                    padding: '14px 16px 14px 64px',
+                    fontSize: '11px',
+                    color: 'var(--text-disabled)',
+                    fontStyle: 'italic',
+                    borderBottom: '1px solid var(--border)'
+                  }}>
+                    No active tasks
+                  </div>
+                )}
+              </>
             )}
           </div>
-        )}
+        </div>
       </div>
 
       {/* New Task Creation Modal */}
