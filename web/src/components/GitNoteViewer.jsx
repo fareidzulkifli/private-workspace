@@ -102,13 +102,41 @@ function resolvePath(base, relative) {
   return resolved.join('/')
 }
 
-function rewriteImageSrcs(html, filePath, rawBase) {
+function isLocalMediaRef(value) {
+  const ref = String(value || '').trim()
+  return ref !== ''
+    && !/^(?:[a-z][a-z0-9+.-]*:|\/\/|\/|#)/i.test(ref)
+    && !ref.includes('\\')
+}
+
+function stripURLSuffix(value) {
+  const index = value.search(/[?#]/)
+  return index >= 0 ? value.slice(0, index) : value
+}
+
+function rewriteMediaSrcs(html, filePath, rawBase) {
+  if (typeof document === 'undefined') return html
+
   const dir = filePath.split('/').slice(0, -1).join('/')
-  return html.replace(/<img([^>]*?)\ssrc="([^"]*)"([^>]*?)>/gi, (match, before, src, after) => {
-    if (/^https?:\/\/|^\/|^data:/.test(src)) return match
-    const resolved = resolvePath(dir, src)
-    return `<img${before} src="${rawBase}?path=${encodeURIComponent(resolved)}"${after}>`
+  const template = document.createElement('template')
+  template.innerHTML = html
+
+  const rewriteAttr = (element, attr) => {
+    const src = element.getAttribute(attr)
+    if (!isLocalMediaRef(src)) return
+
+    const resolved = resolvePath(dir, stripURLSuffix(src))
+    element.setAttribute(attr, `${rawBase}?path=${encodeURIComponent(resolved)}&from=${encodeURIComponent(filePath)}`)
+  }
+
+  template.content.querySelectorAll('img[src], video[src], audio[src], source[src]').forEach(element => {
+    rewriteAttr(element, 'src')
   })
+  template.content.querySelectorAll('video[poster]').forEach(element => {
+    rewriteAttr(element, 'poster')
+  })
+
+  return template.innerHTML
 }
 
 function sanitizeGeneratedPreviewHtml(html) {
@@ -178,7 +206,7 @@ async function copyToClipboard(text) {
   }
 }
 
-export default function GitNoteViewer({ filePath, onToggleExplorer, explorerVisible, theme, onToggleTheme, rawBase = '/api/gitnote/raw', disableShare = false, showBreadcrumbs = true }) {
+export default function GitNoteViewer({ filePath, onToggleExplorer, explorerVisible, theme, onToggleTheme, rawBase = '/api/gitnote/raw', downloadBase = null, disableShare = false, showBreadcrumbs = true }) {
   const [content, setContent]           = useState(null)
   const [rendered, setRendered]         = useState(null) // { type: 'docx'|'excel', html?, sheets? }
   const [activeSheet, setActiveSheet]   = useState(0)
@@ -237,6 +265,10 @@ export default function GitNoteViewer({ filePath, onToggleExplorer, explorerVisi
   const isExcel  = EXCEL_EXTENSIONS.has(ext)
   const isImage  = IMAGE_EXTENSIONS.has(ext)
   const rawUrl   = filePath ? `${rawBase}?path=${encodeURIComponent(filePath)}` : null
+  const downloadUrl = filePath && downloadBase ? `${downloadBase}?path=${encodeURIComponent(filePath)}` : rawUrl
+  const downloadFilename = downloadBase && ext === 'md'
+    ? decodeURIComponent(filename).replace(/\.[^.]*$/, '') + '.zip'
+    : decodeURIComponent(filename)
 
   useEffect(() => {
     if (content === null || ext !== 'md') {
@@ -245,7 +277,7 @@ export default function GitNoteViewer({ filePath, onToggleExplorer, explorerVisi
     }
     const raw = stripFrontMatter(content)
     const html = marked.parse(raw)
-    const htmlWithImageUrls = rewriteImageSrcs(html, filePath, rawBase)
+    const htmlWithImageUrls = rewriteMediaSrcs(html, filePath, rawBase)
     setMarkdownHtml(sanitizeGeneratedPreviewHtml(htmlWithImageUrls))
   }, [content, ext, filePath, rawBase])
 
@@ -416,7 +448,7 @@ export default function GitNoteViewer({ filePath, onToggleExplorer, explorerVisi
               </span>
             </button>
           )}
-          <a href={rawUrl} download={decodeURIComponent(filename)} className="gn-download-btn" title="Download file">
+          <a href={downloadUrl} download={downloadFilename} className="gn-download-btn" title="Download file">
             <Download size={12} />
             <span>Download</span>
           </a>

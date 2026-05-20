@@ -9,6 +9,7 @@ export default function ShareNoteLayout({ token, filePath }) {
   const [theme, setTheme] = useState('light')
   const [selectedPath, setSelectedPath] = useState(filePath)
   const rawBase = `/api/share/gitnote/${encodeURIComponent(token)}/raw`
+  const downloadBase = `/api/share/gitnote/${encodeURIComponent(token)}/download`
 
   useEffect(() => {
     setSelectedPath(filePath)
@@ -59,6 +60,7 @@ export default function ShareNoteLayout({ token, filePath }) {
           filePath={selectedPath}
           theme={theme}
           rawBase={rawBase}
+          downloadBase={downloadBase}
           disableShare
           showBreadcrumbs={false}
           onToggleTheme={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}

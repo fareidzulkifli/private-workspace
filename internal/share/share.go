@@ -1,6 +1,8 @@
 package share
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -8,7 +10,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
+	"net/url"
+	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -26,6 +32,16 @@ const (
 	shareSlugMaxLength    = 48
 	publicShareRateLimit  = 120
 	publicShareRateWindow = time.Minute
+	downloadMaxFiles      = 64
+	downloadMaxBytes      = 50 << 20
+)
+
+var (
+	htmlMediaTagPattern   = regexp.MustCompile(`(?is)<(?:img|video|audio|source)\b[^>]*>`)
+	htmlMediaAttrPattern  = regexp.MustCompile(`(?is)\s(?:src|poster)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))`)
+	markdownRefDefPattern = regexp.MustCompile(`(?m)^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]+>|[^\s\n]+)`)
+	markdownRefUsePattern = regexp.MustCompile(`!?\[[^\]\n]*\]\[([^\]\n]+)\]`)
+	wikiEmbedPattern      = regexp.MustCompile(`!\[\[([^\]\n]+)\]\]`)
 )
 
 type GitNoteShare struct {
@@ -281,6 +297,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/share/gitnote/{token}", h.GetPublicShare)
 	r.Get("/api/share/gitnote/{token}/tree", h.PublicTree)
 	r.Get("/api/share/gitnote/{token}/raw", h.PublicRaw)
+	r.Get("/api/share/gitnote/{token}/download", h.PublicDownload)
 }
 
 func (h *Handler) ListGitNoteShares(w http.ResponseWriter, r *http.Request) {
@@ -374,7 +391,7 @@ func (h *Handler) PublicRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filePath, err := gitnote.NormalizePath(r.URL.Query().Get("path"))
-	if err != nil || !gitnote.PathWithinPrefix(filePath, share.PathPrefix) {
+	if err != nil || !h.publicPathAllowed(r.Context(), share, filePath, r.URL.Query().Get("from")) {
 		httputil.NotFound(w, r)
 		return
 	}
@@ -389,6 +406,358 @@ func (h *Handler) PublicRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	gitnote.WriteRaw(w, filePath, file)
+}
+
+func (h *Handler) PublicDownload(w http.ResponseWriter, r *http.Request) {
+	token := chi.URLParam(r, "token")
+	if !h.allowPublicShareRequest(w, r, token) {
+		return
+	}
+	share, err := h.repo.ActiveByToken(r.Context(), token)
+	if err != nil {
+		writePublicShareError(w, r, err)
+		return
+	}
+	filePathValue := r.URL.Query().Get("path")
+	if strings.TrimSpace(filePathValue) == "" {
+		filePathValue = share.PathPrefix
+	}
+	filePath, err := gitnote.NormalizePath(filePathValue)
+	if err != nil || !gitnote.PathWithinPrefix(filePath, share.PathPrefix) {
+		httputil.NotFound(w, r)
+		return
+	}
+	if h.client == nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "GITHUB_PAT not configured")
+		return
+	}
+	file, err := h.client.Raw(r.Context(), filePath)
+	if err != nil {
+		writePublicRawError(w, r, err)
+		return
+	}
+	if !isMarkdownPath(filePath) {
+		writeAttachment(w, filePath, file)
+		return
+	}
+	if err := h.writeMarkdownBundle(w, r, filePath, file.Body); err != nil {
+		writePublicRawError(w, r, err)
+	}
+}
+
+func (h *Handler) publicPathAllowed(ctx context.Context, share GitNoteShare, filePath string, fromValue string) bool {
+	if gitnote.PathWithinPrefix(filePath, share.PathPrefix) {
+		return true
+	}
+	if h.client == nil || !isMediaDependencyPath(filePath) {
+		return false
+	}
+
+	fromPath := share.PathPrefix
+	if strings.TrimSpace(fromValue) != "" {
+		normalized, err := gitnote.NormalizePath(fromValue)
+		if err != nil {
+			return false
+		}
+		fromPath = normalized
+	}
+	if !isMarkdownPath(fromPath) || !gitnote.PathWithinPrefix(fromPath, share.PathPrefix) {
+		return false
+	}
+	return h.markdownReferencesPath(ctx, fromPath, filePath)
+}
+
+func (h *Handler) markdownReferencesPath(ctx context.Context, markdownPath string, targetPath string) bool {
+	file, err := h.client.Raw(ctx, markdownPath)
+	if err != nil {
+		return false
+	}
+	for _, dependency := range markdownDependencyPaths(markdownPath, file.Body) {
+		if dependency == targetPath {
+			return true
+		}
+	}
+	return false
+}
+
+type bundleFile struct {
+	Path string
+	Body []byte
+}
+
+func (h *Handler) writeMarkdownBundle(w http.ResponseWriter, r *http.Request, markdownPath string, markdownBody []byte) error {
+	files := []bundleFile{{Path: markdownPath, Body: markdownBody}}
+	totalBytes := len(markdownBody)
+	seen := map[string]bool{markdownPath: true}
+
+	for _, dependency := range markdownDependencyPaths(markdownPath, markdownBody) {
+		if seen[dependency] {
+			continue
+		}
+		if len(files) >= downloadMaxFiles {
+			return gitnote.HTTPError{Status: http.StatusRequestEntityTooLarge, Message: "Download bundle too large"}
+		}
+		dependencyFile, err := h.client.Raw(r.Context(), dependency)
+		if err != nil {
+			var httpErr gitnote.HTTPError
+			if errors.As(err, &httpErr) && httpErr.Status == http.StatusNotFound {
+				continue
+			}
+			return err
+		}
+		totalBytes += len(dependencyFile.Body)
+		if totalBytes > downloadMaxBytes {
+			return gitnote.HTTPError{Status: http.StatusRequestEntityTooLarge, Message: "Download bundle too large"}
+		}
+		files = append(files, bundleFile{Path: dependency, Body: dependencyFile.Body})
+		seen[dependency] = true
+	}
+
+	var buf bytes.Buffer
+	zipWriter := zip.NewWriter(&buf)
+	for _, file := range files {
+		header := &zip.FileHeader{
+			Name:   file.Path,
+			Method: zip.Deflate,
+		}
+		header.SetModTime(time.Now().UTC())
+		entry, err := zipWriter.CreateHeader(header)
+		if err != nil {
+			_ = zipWriter.Close()
+			return err
+		}
+		if _, err := entry.Write(file.Body); err != nil {
+			_ = zipWriter.Close()
+			return err
+		}
+	}
+	if err := zipWriter.Close(); err != nil {
+		return err
+	}
+
+	filename := strings.TrimSuffix(path.Base(markdownPath), path.Ext(markdownPath))
+	if filename == "" {
+		filename = "note"
+	}
+	filename = safeDownloadFilename(filename + ".zip")
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+	w.Header().Set("Cache-Control", "s-maxage=300, stale-while-revalidate=60")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
+	return nil
+}
+
+func writeAttachment(w http.ResponseWriter, filePath string, file gitnote.RawFile) {
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{
+		"filename": safeDownloadFilename(path.Base(filePath)),
+	}))
+	gitnote.WriteRaw(w, filePath, file)
+}
+
+func markdownDependencyPaths(markdownPath string, body []byte) []string {
+	rawRefs := extractMarkdownMediaRefs(string(body))
+	paths := make([]string, 0, len(rawRefs))
+	seen := map[string]bool{}
+	for _, rawRef := range rawRefs {
+		resolved, ok := resolveMarkdownDependencyPath(markdownPath, rawRef)
+		if !ok || !isMediaDependencyPath(resolved) || seen[resolved] {
+			continue
+		}
+		paths = append(paths, resolved)
+		seen[resolved] = true
+	}
+	return paths
+}
+
+func extractMarkdownMediaRefs(markdown string) []string {
+	refs := extractInlineMarkdownDestinations(markdown)
+	definitions := markdownReferenceDefinitions(markdown)
+	for _, match := range markdownRefUsePattern.FindAllStringSubmatch(markdown, -1) {
+		if len(match) <= 1 {
+			continue
+		}
+		if ref, ok := definitions[normalizeMarkdownReferenceLabel(match[1])]; ok {
+			refs = append(refs, ref)
+		}
+	}
+	for _, match := range wikiEmbedPattern.FindAllStringSubmatch(markdown, -1) {
+		if len(match) > 1 {
+			ref := strings.TrimSpace(match[1])
+			if idx := strings.IndexAny(ref, "|#"); idx >= 0 {
+				ref = ref[:idx]
+			}
+			refs = append(refs, ref)
+		}
+	}
+	for _, tag := range htmlMediaTagPattern.FindAllString(markdown, -1) {
+		for _, match := range htmlMediaAttrPattern.FindAllStringSubmatch(tag, -1) {
+			for i := 1; i < len(match); i++ {
+				if match[i] != "" {
+					refs = append(refs, match[i])
+					break
+				}
+			}
+		}
+	}
+	return refs
+}
+
+func markdownReferenceDefinitions(markdown string) map[string]string {
+	definitions := map[string]string{}
+	for _, match := range markdownRefDefPattern.FindAllStringSubmatch(markdown, -1) {
+		if len(match) > 2 {
+			definitions[normalizeMarkdownReferenceLabel(match[1])] = match[2]
+		}
+	}
+	return definitions
+}
+
+func normalizeMarkdownReferenceLabel(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+}
+
+func extractInlineMarkdownDestinations(markdown string) []string {
+	refs := []string{}
+	for i := 0; i < len(markdown)-1; i++ {
+		if markdown[i] != ']' || markdown[i+1] != '(' {
+			continue
+		}
+		start := i + 2
+		end := findClosingMarkdownParen(markdown, start)
+		if end < 0 {
+			continue
+		}
+		refs = append(refs, markdown[start:end])
+		i = end
+	}
+	return refs
+}
+
+func findClosingMarkdownParen(markdown string, start int) int {
+	depth := 0
+	escaped := false
+	for i := start; i < len(markdown); i++ {
+		switch {
+		case escaped:
+			escaped = false
+		case markdown[i] == '\\':
+			escaped = true
+		case markdown[i] == '(':
+			depth++
+		case markdown[i] == ')':
+			if depth == 0 {
+				return i
+			}
+			depth--
+		}
+	}
+	return -1
+}
+
+func resolveMarkdownDependencyPath(markdownPath string, rawRef string) (string, bool) {
+	ref := cleanMarkdownDestination(rawRef)
+	if !isLocalDependencyRef(ref) {
+		return "", false
+	}
+	ref = stripURLSuffix(ref)
+	if decoded, err := url.PathUnescape(ref); err == nil {
+		ref = decoded
+	}
+	baseDir := path.Dir(markdownPath)
+	if baseDir == "." {
+		baseDir = ""
+	}
+	normalized, err := gitnote.NormalizePath(path.Clean(path.Join(baseDir, ref)))
+	if err != nil {
+		return "", false
+	}
+	return normalized, true
+}
+
+func cleanMarkdownDestination(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "<") {
+		if end := strings.IndexByte(value, '>'); end >= 0 {
+			value = value[1:end]
+		}
+	} else {
+		value = firstMarkdownDestinationToken(value)
+	}
+	replacer := strings.NewReplacer(`\ `, " ", `\(`, "(", `\)`, ")", `\\`, `\`)
+	return strings.TrimSpace(replacer.Replace(value))
+}
+
+func firstMarkdownDestinationToken(value string) string {
+	var b strings.Builder
+	escaped := false
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		if escaped {
+			b.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+		if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
+			break
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
+func isLocalDependencyRef(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasPrefix(value, "#") || strings.HasPrefix(value, "/") || strings.HasPrefix(value, `\`) || strings.Contains(value, `\`) {
+		return false
+	}
+	if strings.HasPrefix(value, "//") {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Scheme == ""
+}
+
+func stripURLSuffix(value string) string {
+	if idx := strings.IndexAny(value, "?#"); idx >= 0 {
+		return value[:idx]
+	}
+	return value
+}
+
+func isMarkdownPath(filePath string) bool {
+	return strings.EqualFold(path.Ext(filePath), ".md")
+}
+
+func isMediaDependencyPath(filePath string) bool {
+	switch strings.ToLower(strings.TrimPrefix(path.Ext(filePath), ".")) {
+	case "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "avif", "svg",
+		"mp3", "wav", "ogg", "m4a", "flac",
+		"mp4", "webm", "mov", "m4v",
+		"pdf":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeDownloadFilename(filePath string) string {
+	name := path.Base(filePath)
+	name = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == '/' || r == '\\' {
+			return -1
+		}
+		return r
+	}, name)
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." {
+		return "download"
+	}
+	return name
 }
 
 type createRequest struct {
