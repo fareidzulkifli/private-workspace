@@ -138,7 +138,7 @@ function stripFrontMatter(text) {
   return match ? text.slice(match[0].length) : text
 }
 
-marked.setOptions({ gfm: true, breaks: false })
+marked.setOptions({ gfm: true, breaks: true })
 
 function decodePathSegment(value) {
   try {
